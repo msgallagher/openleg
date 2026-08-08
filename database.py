@@ -1053,7 +1053,23 @@ def get_all_building_profiles(city_id: Optional[str] = None) -> List[Dict]:
                         FROM buildings
                         WHERE verified = TRUE
                     """)
-                return [dict(row) for row in cur.fetchall()]
+                # NUMERIC columns come back as Decimal, which numpy/pandas cannot
+                # mix with float (np.radians, division). Coerce at the seam so
+                # every caller gets plain floats.
+                numeric_fields = (
+                    "lat",
+                    "lon",
+                    "annual_consumption_kwh",
+                    "potential_pv_kwp",
+                )
+                profiles = []
+                for row in cur.fetchall():
+                    profile = dict(row)
+                    for field in numeric_fields:
+                        if profile.get(field) is not None:
+                            profile[field] = float(profile[field])
+                    profiles.append(profile)
+                return profiles
     except Exception as e:
         logger.error(f"[DB] Error getting building profiles: {e}")
         return []
