@@ -173,3 +173,6 @@ logo-explore/
 # data/public/ stays tracked: it holds published PV/ElCom datasets only.
 /data/*
 !/data/public/
+
+# Local throwaway scripts: seeding, bootstrapping, one-off utilities
+scratch/
