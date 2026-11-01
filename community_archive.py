@@ -14,7 +14,8 @@ from psycopg2 import sql
 from psycopg2.extras import Json, execute_values
 
 LEGACY_SCHEMA_VERSION = "openleg-community-archive/1"
-SCHEMA_VERSION = "openleg-community-archive/2"
+V2_SCHEMA_VERSION = "openleg-community-archive/2"
+SCHEMA_VERSION = "openleg-community-archive/3"
 SOURCE_PROVENANCE = "OpenLEG PostgreSQL operational store"
 
 
@@ -70,6 +71,8 @@ def export_community_archive(community_id: str, *, store=None) -> bytes:
         raise ArchiveError("VNB evidence cannot be archived safely")
     if _validate_operating_relations(datasets):
         raise ArchiveError("Operational record cannot be archived safely")
+    if _validate_imbalance_evidence(datasets):
+        raise ArchiveError("Billing release evidence cannot be archived safely")
     encoded = {table: _json_value(datasets.get(table, [])) for table, _, _ in _DATASETS}
     hashes = {
         name: f"sha256:{hashlib.sha256(_canonical(rows)).hexdigest()}"
@@ -111,7 +114,7 @@ def restore_community_archive(archive: bytes | str, *, dry_run=False, store=None
             "conflicts": [],
         }
     version = manifest.get("schema_version")
-    if version not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
+    if version not in {LEGACY_SCHEMA_VERSION, V2_SCHEMA_VERSION, SCHEMA_VERSION}:
         errors.append("Unsupported schema version")
     hashes = manifest.get("hashes")
     if not isinstance(hashes, dict):
@@ -120,7 +123,13 @@ def restore_community_archive(archive: bytes | str, *, dry_run=False, store=None
             "errors": ["Archive hashes manifest is not a mapping"],
             "conflicts": [],
         }
-    dataset_specs = _LEGACY_DATASETS if version == LEGACY_SCHEMA_VERSION else _DATASETS
+    dataset_specs = (
+        _LEGACY_DATASETS
+        if version == LEGACY_SCHEMA_VERSION
+        else _V2_DATASETS
+        if version == V2_SCHEMA_VERSION
+        else _DATASETS
+    )
     expected_datasets = {table for table, _, _ in dataset_specs}
     if set(datasets) != expected_datasets:
         errors.append("Archive dataset list does not match schema")
@@ -159,7 +168,7 @@ def restore_community_archive(archive: bytes | str, *, dry_run=False, store=None
         for row in dataset_rows("metering_point_readings")
         if isinstance(row, dict) and row.get("source_document_id") is not None
     }
-    if version == SCHEMA_VERSION:
+    if version in {V2_SCHEMA_VERSION, SCHEMA_VERSION}:
         source_document_ids.update(
             row["vnb_case_id"]
             for row in dataset_rows("vnb_calculated_values_deliveries")
@@ -228,6 +237,7 @@ def restore_community_archive(archive: bytes | str, *, dry_run=False, store=None
     if not errors:
         errors.extend(_validate_vnb_evidence(decoded))
         errors.extend(_validate_operating_relations(decoded))
+        errors.extend(_validate_imbalance_evidence(decoded))
 
     conflicts = (
         store.find_conflicts(community_id, datasets)
@@ -306,7 +316,7 @@ _OWNED_DELIVERY_IDS = """SELECT d.id FROM vnb_calculated_values_deliveries d
     JOIN buildings b ON b.building_id = c.admin_building_id
     WHERE d.community_id = %s AND d.territory = b.city_id
       AND d.status = 'accepted'"""
-_DATASETS = tuple(
+_V2_DATASETS = tuple(
     (
         table,
         predicate
@@ -335,7 +345,7 @@ _DATASETS = tuple(
 )
 
 
-_DATASETS += (
+_V2_DATASETS += (
     ("vnb_submission_cases", "community_id = %s", "community_id"),
     ("vnb_mutation_cases", "community_id = %s", "community_id"),
     (
@@ -346,7 +356,7 @@ _DATASETS += (
 )
 
 
-_DATASETS += (
+_V2_DATASETS += (
     ("bank_statement_imports", "community_id = %s", "community_id"),
     ("bank_statement_entries", "community_id = %s", "community_id"),
     ("invoice_queries", "community_id = %s", "community_id"),
@@ -375,6 +385,12 @@ _DATASETS += (
         ),
         "community_id",
     ),
+)
+
+
+_DATASETS = _V2_DATASETS + (
+    ("billing_imbalance_releases", "community_id = %s", "community_id"),
+    ("billing_imbalance_blocks", "community_id = %s", "community_id"),
 )
 
 
@@ -578,6 +594,51 @@ def _validate_operating_relations(datasets):
         ):
             errors.append("Operator replay scope violation")
     return errors
+
+
+def _validate_imbalance_evidence(datasets):
+    """Preserve the durable release that a draft needs for approval."""
+    import billing_approval
+
+    community_id = datasets["communities"][0].get("community_id")
+    releases = {}
+    for table in ("billing_imbalance_releases", "billing_imbalance_blocks"):
+        rows = datasets.get(table, [])
+        if not isinstance(rows, list):
+            return ["Invalid billing imbalance dataset"]
+        for row in rows:
+            if not isinstance(row, dict) or row.get("community_id") != community_id:
+                return [f"Community scope violation: {table}"]
+            if table == "billing_imbalance_releases":
+                identifier = row.get("id")
+                if (
+                    type(identifier) is not int
+                    or identifier < 1
+                    or identifier in releases
+                ):
+                    return ["Invalid billing release identifier"]
+                releases[identifier] = row
+    for period in datasets.get("billing_periods", []):
+        reconciliation = period.get("reconciliation")
+        if isinstance(reconciliation, str):
+            try:
+                reconciliation = json.loads(reconciliation)
+            except ValueError:
+                continue
+        if not isinstance(reconciliation, dict) or not (
+            {"vnb_imbalance_release", "vnb_imbalance_tolerance_ratio"}
+            & reconciliation.keys()
+        ):
+            continue
+        period = {**period, "reconciliation": reconciliation}
+        frozen = billing_approval.imbalance_release(period)
+        identifier = frozen.get("id") if frozen is not None else None
+        durable = releases.get(identifier) if type(identifier) is int else None
+        try:
+            billing_approval.validate_imbalance_release(period, durable)
+        except billing_approval.BillingApprovalError:
+            return ["Billing release evidence mismatch"]
+    return []
 
 
 class PostgresArchiveStore:

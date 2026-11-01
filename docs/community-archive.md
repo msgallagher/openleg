@@ -1,8 +1,8 @@
 # Community archive
 
-The LEG dashboard exports `openleg-community-archive/2` JSON. The reader also
-accepts the exact version 1 dataset contract. Older installations reject
-version 2; upgrade the destination before importing a version 2 archive.
+The LEG dashboard exports `openleg-community-archive/3` JSON. The reader also
+accepts the exact version 1 and version 2 dataset contracts. Upgrade older
+destinations before importing a version 3 archive.
 Export requires a confirmed LEG administrator session. Dry-run and HTTP restore
 require that session and CSRF protection. HTTP restore writes also require
 platform administrator authentication; send the credential in `X-Admin-Token`.
@@ -69,6 +69,17 @@ or bank entry belongs to the archive. In-flight reservations, metering retry
 keys tied to deployment job IDs and orphan replay keys are excluded. An API client
 reenrolled on the destination can replay an earlier completed case/payment
 request without appending a second transition.
+
+Version 3 retains these records and adds this community's billing imbalance
+releases and blocks. Releases preserve their identifiers, period windows,
+tolerance ratios, reasons, actors and timestamps, including release history.
+Historical actors need not still be community members. Export and restore
+reject foreign release or block rows and drafts whose frozen release does not
+match the durable row's identity, community, window and audit fields. Missing
+release evidence is refused. Restore advances the release serial sequence
+through the same transaction as other imported identifiers. Versions 1 and 2
+retain their original dataset lists; genuine older archives without release
+references remain supported. An archive does not authorize a tolerance change.
 
 Live operator credentials, webhook destinations/signing secrets, pending webhook
 dispatch and credential rate-usage logs are excluded. Reenrol clients, configure

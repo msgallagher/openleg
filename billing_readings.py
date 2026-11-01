@@ -428,13 +428,15 @@ def load_period_frames(
     *,
     timezone=DEFAULT_TIMEZONE,
     max_imbalance_ratio=None,
+    calculated_delivery=None,
 ):
     """Load one billable period as engine-ready frames.
 
     The interval is half-open: ``[period_start, period_end)``. Naive boundaries
     are interpreted in ``timezone``. Raises :class:`PeriodDataError` listing
     every defect rather than the first one, so an operator can fix a period in
-    one pass.
+    one pass. An accepted calculated delivery supplies the allocation reference;
+    physical readings and completeness still come from the period snapshot.
     """
     tolerance = imbalance_tolerance(max_imbalance_ratio)
     tzinfo = ZoneInfo(timezone)
@@ -518,7 +520,11 @@ def load_period_frames(
     if problems:
         raise PeriodDataError(problems)
 
-    vnb_reference = _vnb_reference(vnb_totals, participants, problems, tolerance)
+    vnb_reference = (
+        _vnb_reference(vnb_totals, participants, problems, tolerance)
+        if calculated_delivery is None
+        else {}
+    )
     if problems:
         raise PeriodDataError(problems)
     provenance = {
@@ -530,13 +536,18 @@ def load_period_frames(
         "timezone": timezone,
     }
 
-    return PeriodFrames(
+    result = PeriodFrames(
         consumption=frames["consumption"].astype(float),
         production=frames["production"].astype(float),
         participants=participants,
         vnb_reference=vnb_reference,
         provenance=provenance,
     )
+    if calculated_delivery is not None:
+        return with_calculated_vnb_evidence(
+            result, calculated_delivery, max_imbalance_ratio=tolerance
+        )
+    return result
 
 
 def reconcile_with_vnb(frames, summary):

@@ -958,6 +958,22 @@ def test_a_failing_draft_lookup_still_reports_the_imbalance(monkeypatch):
         monkeypatch, consumption_community_kwh=_SLIGHTLY_UNBALANCED
     )
     monkeypatch.setattr(database, "is_db_available", lambda: True)
+    snapshot = database.get_billable_period_snapshot(COMMUNITY, START, END)
+    monkeypatch.setattr(
+        database,
+        "get_validated_calculated_values",
+        lambda *_args: {
+            "status": "accepted",
+            "normalized_records": [
+                {
+                    "participant_id": "building-a",
+                    "direction": row["direction"],
+                    "allocated_kwh": row["community_kwh"],
+                }
+                for row in snapshot["readings"]
+            ],
+        },
+    )
 
     def exhausted(*_args):
         raise psycopg2.pool.PoolError("connection pool exhausted")
@@ -1045,7 +1061,9 @@ def test_operational_billing_requires_accepted_calculated_values(monkeypatch):
     assert saved == []
 
 
-def test_operational_billing_stamps_the_recorded_vnb_evidence(monkeypatch):
+def test_operational_billing_passes_the_recorded_vnb_evidence_to_the_loader(
+    monkeypatch,
+):
     """A run on the real database path must fetch the validated evidence for
     exactly this community and period, stamp it into the frames, and freeze
     the evidence's fingerprint plus the prepared-by actor in the draft."""
@@ -1063,19 +1081,17 @@ def test_operational_billing_stamps_the_recorded_vnb_evidence(monkeypatch):
     calculated = {"interval_count": 3}
     calculated_read = MagicMock(return_value=calculated)
     monkeypatch.setattr(database, "get_validated_calculated_values", calculated_read)
-    stamped = MagicMock(side_effect=lambda frames, _evidence, **_kwargs: frames)
-    monkeypatch.setattr(
-        billing_runner.billing_readings, "with_calculated_vnb_evidence", stamped
-    )
+    loaded = MagicMock(return_value=deepcopy(case["frames"]))
+    monkeypatch.setattr(billing_runner.billing_readings, "load_period_frames", loaded)
 
     result = run_billing_period(COMMUNITY, START, END)
 
     assert result["status"] == "created"
     calculated_read.assert_called_once_with(COMMUNITY, START, END)
-    assert stamped.call_count == 1
-    assert stamped.call_args[0][0] is not None
-    assert stamped.call_args[0][1] is calculated, (
-        "the fetched evidence must be the one stamped into the frames"
+    assert loaded.call_count == 1
+    assert loaded.call_args.args == (COMMUNITY, START, END)
+    assert loaded.call_args.kwargs["calculated_delivery"] is calculated, (
+        "the fetched evidence must supply the loader's allocation reference"
     )
     assert saved[0][:3] == (COMMUNITY, START, END), (
         "the draft must persist for the billed community and period"

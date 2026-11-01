@@ -13,6 +13,34 @@ def _module():
     return import_module("billing_workspace")
 
 
+@pytest.mark.parametrize(
+    "marker,expected",
+    [
+        (None, False),
+        ([], False),
+        ("e66/1", False),
+        (False, False),
+        (1, False),
+        ({"format_version": "e66/1"}, True),
+    ],
+    ids=["null", "list", "string", "bool", "number", "dict"],
+)
+def test_exact_source_readiness_requires_a_dictionary_marker(marker, expected):
+    flags = _module().readiness_flags(
+        {
+            "source_document_ids": ["e66"],
+            "reconciliation": {
+                "precision_policy": marker,
+                "difference_kwh": 0.001,
+                "production_per_participant": {"producer": {"difference_kwh": -0.001}},
+            },
+        }
+    )
+
+    assert flags["exact_source"] is expected
+    assert flags["reconciled"] is expected
+
+
 def test_load_returns_an_honest_empty_state_without_loading_a_detail(monkeypatch):
     workspace = _module()
     monkeypatch.setattr(workspace.db, "list_billing_periods", lambda limit=100: [])

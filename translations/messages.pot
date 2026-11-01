@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-10-31 08:33+0100\n"
+"POT-Creation-Date: 2026-11-01 12:54+0100\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -701,7 +701,7 @@ msgstr ""
 msgid "Abweichung"
 msgstr ""
 
-#: billing_workspace.py:260
+#: billing_workspace.py:262
 msgid "Abweichung prüfen"
 msgstr ""
 
@@ -3104,7 +3104,7 @@ msgid ""
 "Dokumente vor der Unterzeichnung juristisch prüfen."
 msgstr ""
 
-#: billing_workspace.py:218
+#: billing_workspace.py:220
 msgid ""
 "Dieser Abrechnungsentwurf ist keine definitive Rechnung. Prüfen Sie Tarif, Abgleich und "
 "Quelldokumente."
@@ -3497,7 +3497,7 @@ msgstr ""
 msgid "Eine handlungsorientierte Übersicht von der Adressprüfung bis zum Betrieb."
 msgstr ""
 
-#: billing_policy.py:89 billing_workspace.py:242 billing_workspace.py:243
+#: billing_policy.py:89 billing_workspace.py:244 billing_workspace.py:245
 #: templates/leg_community_create.html:22
 msgid "Einfach"
 msgstr ""
@@ -3879,7 +3879,7 @@ msgstr ""
 msgid "Es prüft den lokalen Health-Endpunkt."
 msgstr ""
 
-#: billing_workspace.py:263
+#: billing_workspace.py:265
 msgid "Exakte VNB-Quelle massgebend, Abweichung zum Modell ausgewiesen"
 msgstr ""
 
@@ -4731,7 +4731,7 @@ msgstr ""
 msgid "Glarus"
 msgstr ""
 
-#: billing_policy.py:84 billing_workspace.py:249
+#: billing_policy.py:84 billing_workspace.py:251
 msgid "Gleiche Netzebene"
 msgstr ""
 
@@ -7263,8 +7263,8 @@ msgstr ""
 msgid "Neuenburg"
 msgstr ""
 
-#: billing_workspace.py:246 billing_workspace.py:253 billing_workspace.py:300 billing_workspace.py:304
-#: billing_workspace.py:308 dashboard.py:570 templates/utility/dashboard.html:60
+#: billing_workspace.py:248 billing_workspace.py:255 billing_workspace.py:302 billing_workspace.py:306
+#: billing_workspace.py:310 dashboard.py:570 templates/utility/dashboard.html:60
 #: templates/utility/dashboard.html:124 templates/utility/dashboard.html:132
 msgid "Nicht angegeben"
 msgstr ""
@@ -8168,7 +8168,7 @@ msgstr ""
 msgid "Projektverpflichtungen"
 msgstr ""
 
-#: billing_policy.py:88 billing_workspace.py:241 templates/leg_community_create.html:23
+#: billing_policy.py:88 billing_workspace.py:243 templates/leg_community_create.html:23
 msgid "Proportional"
 msgstr ""
 
@@ -9737,7 +9737,7 @@ msgstr ""
 msgid "Ungültiges Token-Format"
 msgstr ""
 
-#: billing_policy.py:85 billing_workspace.py:250
+#: billing_policy.py:85 billing_workspace.py:252
 msgid "Unterschiedliche Netzebenen"
 msgstr ""
 
@@ -10033,7 +10033,7 @@ msgstr ""
 msgid "Vier-Augen-Prinzip"
 msgstr ""
 
-#: billing_workspace.py:266
+#: billing_workspace.py:268
 msgid "Vollständig abgeglichen"
 msgstr ""
 

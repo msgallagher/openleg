@@ -259,7 +259,12 @@ def test_only_a_blocked_window_can_be_released(app_module, monkeypatch):  # noqa
     september = datetime(2026, 9, 1, tzinfo=ZURICH).isoformat()
 
     response = _client(app_module).post(
-        RELEASE_URL, data={**FORM, "period_start": september}
+        RELEASE_URL,
+        data={
+            **FORM,
+            "period_start": september,
+            "period_end": datetime(2026, 10, 1, tzinfo=ZURICH).isoformat(),
+        },
     )
 
     # Usually a draft was created meanwhile: back to the workspace, saying so.
@@ -526,3 +531,33 @@ def test_line_breaks_count_once_towards_the_reason_limit(
 
     assert response.status_code == 302
     assert save.call_args.args[4] == reason.replace("\r\n", "\n")
+
+
+@pytest.mark.parametrize(
+    "start,end",
+    [(AUGUST_END, AUGUST_START), (AUGUST_START, AUGUST_START)],
+    ids=["reversed", "zero"],
+)
+def test_nonpositive_release_window_is_invalid_before_any_write(
+    app_module,  # noqa: F811
+    monkeypatch,
+    start,
+    end,
+):
+    save, run = _patch_blocks(monkeypatch, app_module)
+
+    response = _client(app_module).post(
+        RELEASE_URL,
+        data={**FORM, "period_start": start.isoformat(), "period_end": end.isoformat()},
+    )
+
+    assert response.status_code == 400
+    result = app_module.dashboard_module.leg_release_billing_imbalance(
+        "community-a",
+        "building-admin",
+        {**FORM, "period_start": start.isoformat(), "period_end": end.isoformat()},
+    )
+    assert result["error"] == "Die Abrechnungsperiode ist ungültig."
+    assert result["error_status"] == 400
+    save.assert_not_called()
+    run.assert_not_called()

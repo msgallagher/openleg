@@ -147,7 +147,9 @@ def _period_summary(period):
 
 def _is_exact_source(reconciliation):
     """Whether the draft bills the exact VNB source rather than the engine."""
-    return isinstance(reconciliation, dict) and "precision_policy" in reconciliation
+    return isinstance(reconciliation, dict) and isinstance(
+        reconciliation.get("precision_policy"), dict
+    )
 
 
 def _is_balanced(reconciliation):

@@ -97,8 +97,9 @@ def test_accepted_e66_reference_survives_clean_database_archive(
 
 
 @pytest.mark.parametrize("state", ["draft", "corrected_issued"])
+@pytest.mark.parametrize("archive_version", [2, 3])
 def test_billing_and_withdrawal_history_survive_clean_restore(
-    rounded_delivery, monkeypatch, state
+    rounded_delivery, monkeypatch, state, archive_version
 ):
     client, db, payload, source = rounded_delivery
     accepted = e66.post_e66(client, source)
@@ -141,6 +142,13 @@ def test_billing_and_withdrawal_history_survive_clean_restore(
             cur.execute(f"SELECT * FROM {table} ORDER BY 1")
             expected[table] = [dict(row) for row in cur.fetchall()]
     archive = community_archive.export_community_archive(cid)
+    if archive_version == 2:
+        parsed = json.loads(archive)
+        parsed["manifest"]["schema_version"] = "openleg-community-archive/2"
+        for table in ("billing_imbalance_releases", "billing_imbalance_blocks"):
+            assert parsed["datasets"].pop(table) == []
+            parsed["manifest"]["hashes"].pop(table)
+        archive = json.dumps(parsed).encode()
     with clean_destination(db, monkeypatch):
         restored = community_archive.restore_community_archive(archive)
         assert restored["valid"], restored

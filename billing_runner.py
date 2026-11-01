@@ -280,7 +280,9 @@ def run_billing_period(
     # snapshot, prorated cost share, fingerprint) matches the cron's run.
     zone = ZoneInfo(billing_readings.DEFAULT_TIMEZONE)
     period_start, period_end = (
-        moment.astimezone(zone) if moment.tzinfo is not None else moment
+        moment.astimezone(zone)
+        if moment.tzinfo is not None
+        else moment.replace(tzinfo=zone)
         for moment in (period_start, period_end)
     )
     try:
@@ -295,24 +297,25 @@ def run_billing_period(
         tolerance = billing_readings.imbalance_tolerance(
             release["max_imbalance_ratio"] if release else None
         )
-        frames = billing_readings.load_period_frames(
-            community_id, period_start, period_end, max_imbalance_ratio=tolerance
-        )
         calculated = None
         if db.is_db_available():
             calculated = db.get_validated_calculated_values(
                 community_id,
-                frames.provenance["period_start"],
-                frames.provenance["period_end"],
+                period_start,
+                period_end,
             )
             if not calculated:
                 raise BillingRunError(
                     "Billing period has no validated VNB calculated-values evidence",
                     code="vnb_evidence_missing",
                 )
-            frames = billing_readings.with_calculated_vnb_evidence(
-                frames, calculated, max_imbalance_ratio=tolerance
-            )
+        frames = billing_readings.load_period_frames(
+            community_id,
+            period_start,
+            period_end,
+            max_imbalance_ratio=tolerance,
+            calculated_delivery=calculated,
+        )
         if not frames.provenance["source_document_ids"]:
             raise BillingRunError(
                 "Billing readings have no import provenance",

@@ -673,7 +673,7 @@ def _form_window(form):
         end = datetime.fromisoformat(form.get("period_end", ""))
     except ValueError:
         return None
-    if start.tzinfo is None or end.tzinfo is None:
+    if start.tzinfo is None or end.tzinfo is None or end <= start:
         return None
     return start, end
 
