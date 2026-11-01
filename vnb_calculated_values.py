@@ -189,6 +189,20 @@ def accept_delivery(
             record_problem = True
             continue
         seen.add(key)
+        if payload.get("format_version") == "json/1":
+            # Check original digits before Decimal unit conversion can round.
+            digits = value.as_tuple()
+            excess_places = -digits.exponent - (3 if unit == "Wh" else 6)
+            if excess_places > 0 and any(digits.digits[-excess_places:]):
+                diagnostics.append(
+                    {
+                        "code": "unsupported_quantity_precision",
+                        "detail": "JSON quantities must be exact multiples of "
+                        "0.000001 kWh after unit conversion",
+                    }
+                )
+                record_problem = True
+                continue
         kwh = value / (Decimal(1000) if unit == "Wh" else Decimal(1))
         normalized.append(
             {

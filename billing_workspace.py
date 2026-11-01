@@ -162,6 +162,19 @@ def _is_balanced(reconciliation):
     """
     if not reconciliation:
         return False
+    if any(
+        reconciliation.get(key) is not None
+        for key in ("vnb_imbalance_release", "vnb_imbalance_tolerance_ratio")
+    ):
+        return False
+    for key in ("vnb_imbalance_kwh", "vnb_imbalance_ratio"):
+        if key in reconciliation:
+            try:
+                value = Decimal(str(reconciliation[key]))
+            except (ArithmeticError, TypeError, ValueError):
+                return False
+            if not value.is_finite() or value != 0:
+                return False
     exact_source = _is_exact_source(reconciliation)
     differences = []
 

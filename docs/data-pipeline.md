@@ -256,6 +256,11 @@ operator exception, and producer quantities are never rescaled or redistributed.
 Zero/zero energy remains valid. The delivered figures and independent model
 allocation remain visible in the reconciliation and `engine_audit`.
 
+New calculated-values JSON deliveries must be exact multiples of 0.000001 kWh
+after Wh conversion. Finer values fail ingestion with
+`unsupported_quantity_precision`, without rounding. See the
+[JSON precision contract](vnb-exchange.md#json-calculated-values-precision).
+
 With a database, the runner fetches the accepted calculated delivery before
 checking the allocation balance. Its accepted split supplies both consumer
 charges and producer credits. A balanced accepted correction can therefore

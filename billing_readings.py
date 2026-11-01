@@ -24,6 +24,7 @@ import logging
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from math import isfinite
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -187,7 +188,18 @@ def _check_rows(readings, mapping, declarations, expected_index, problems):
 
         for channel in ("total_kwh", "grid_kwh", "community_kwh"):
             value = row.get(channel)
-            if value is not None and float(value) < 0:
+            if value is None:
+                continue
+            if not isfinite(float(value)):
+                problems.append(
+                    _problem(
+                        "non_finite_value",
+                        f"{point_id} at {measured_at} has non-finite {channel}",
+                        point_id,
+                    )
+                )
+                continue
+            if float(value) < 0:
                 problems.append(
                     _problem(
                         "negative_value",

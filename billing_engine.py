@@ -113,9 +113,12 @@ def _billed_quantities(billed_allocation, key, engine_quantities):
     values = {}
     for participant, value in quantities.items():
         number = float(value)
-        if not isfinite(number) or number < 0:
+        decimal_value = Decimal(str(value))
+        if not isfinite(number) or not decimal_value.is_finite() or decimal_value < 0:
             raise ValueError("Billed allocation must be finite and non-negative")
-        values[participant] = number
+        values[participant] = float(
+            decimal_value.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+        )
     return values
 
 

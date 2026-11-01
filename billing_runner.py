@@ -348,11 +348,16 @@ def run_billing_period(
             and not battery
             and not legacy_einfach
         )
-        if precision_basis:
+        if precision_basis or (
+            battery
+            and calculated is not None
+            and calculated.get("format_version") == "e66/1"
+        ):
             try:
-                certificate = billing_reconciliation.audit_e66(
-                    calculated, model=policy["distribution_model"]
-                )
+                if precision_basis:
+                    certificate = billing_reconciliation.audit_e66(
+                        calculated, model=policy["distribution_model"]
+                    )
                 source_frames = billing_readings.frames_from_calculated_source(
                     calculated
                 )
@@ -364,33 +369,34 @@ def run_billing_period(
                     )
                 ):
                     raise ValueError("Physical readings differ from accepted source")
-                vnb_consumption, vnb_production = (
-                    billing_readings.calculated_quantity_frames(frames, calculated)
-                )
-                summary = billing_engine.generate_vnb_billing_summary(
-                    frames.production,
-                    frames.consumption,
-                    vnb_consumption,
-                    vnb_production,
-                    grid_fee_per_kwh=policy["grid_fee_chf_per_kwh"],
-                    internal_price_per_kwh=policy["internal_price_chf_per_kwh"],
-                    network_level=policy["network_level"],
-                    distribution_model=policy["distribution_model"],
-                    settlement_fee_per_kwh=policy["settlement_fee_chf_per_kwh"],
-                )
-                # Here the source quantities are what gets billed, so the
-                # reconciliation keeps the engine's own allocation beside them:
-                # approval re-derives exactly this model gap from the source.
-                model = billing_engine.generate_billing_summary(
-                    frames.production,
-                    frames.consumption,
-                    grid_fee_per_kwh=policy["grid_fee_chf_per_kwh"],
-                    internal_price_per_kwh=policy["internal_price_chf_per_kwh"],
-                    network_level=policy["network_level"],
-                    distribution_model=policy["distribution_model"],
-                    settlement_fee_per_kwh=policy["settlement_fee_chf_per_kwh"],
-                )
-                reconciliation = billing_readings.reconcile_with_vnb(frames, model)
+                if precision_basis:
+                    vnb_consumption, vnb_production = (
+                        billing_readings.calculated_quantity_frames(frames, calculated)
+                    )
+                    summary = billing_engine.generate_vnb_billing_summary(
+                        frames.production,
+                        frames.consumption,
+                        vnb_consumption,
+                        vnb_production,
+                        grid_fee_per_kwh=policy["grid_fee_chf_per_kwh"],
+                        internal_price_per_kwh=policy["internal_price_chf_per_kwh"],
+                        network_level=policy["network_level"],
+                        distribution_model=policy["distribution_model"],
+                        settlement_fee_per_kwh=policy["settlement_fee_chf_per_kwh"],
+                    )
+                    # Here the source quantities are what gets billed, so the
+                    # reconciliation keeps the engine's own allocation beside them:
+                    # approval re-derives exactly this model gap from the source.
+                    model = billing_engine.generate_billing_summary(
+                        frames.production,
+                        frames.consumption,
+                        grid_fee_per_kwh=policy["grid_fee_chf_per_kwh"],
+                        internal_price_per_kwh=policy["internal_price_chf_per_kwh"],
+                        network_level=policy["network_level"],
+                        distribution_model=policy["distribution_model"],
+                        settlement_fee_per_kwh=policy["settlement_fee_chf_per_kwh"],
+                    )
+                    reconciliation = billing_readings.reconcile_with_vnb(frames, model)
             except billing_engine.VnbBalancingPolicyRequired as exc:
                 raise BillingRunError(
                     str(exc),
@@ -399,7 +405,8 @@ def run_billing_period(
                 ) from exc
             except ValueError as exc:
                 raise BillingRunError(str(exc), code="vnb_allocation_mismatch") from exc
-            reconciliation["precision_policy"] = certificate
+            if precision_basis:
+                reconciliation["precision_policy"] = certificate
         if battery_lines:
             summary["line_items"].extend(battery_lines)
         if battery_snapshot:
