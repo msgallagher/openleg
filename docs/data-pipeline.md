@@ -294,7 +294,9 @@ tolerance exceeds the default without a frozen release of exactly that ratio. Me
 author and reason stay with the draft. The tolerance only gates the period; the residue is distributed the same
 way at any tolerance. A period where the VNB allocated energy to only one side,
 consumers or producers, fails closed whatever the tolerance. A window that
-already has a live draft records no block.
+already has a live draft records no block. With a database, the run bills the
+accepted calculated delivery rather than the imported E66 split, so the check
+applies to that delivery's split; the imported split no longer stops the run.
 
 A period on the precision policy below (an accepted `e66/1` delivery, no
 battery) is priced from the exact source decimals instead, under the same
