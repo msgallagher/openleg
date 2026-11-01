@@ -7,7 +7,7 @@ Implements Art. 17d/17e StromVG allocation models:
 - Network discount: 40% same level, 20% cross level
 """
 
-from decimal import ROUND_DOWN, ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from math import floor, isfinite
 
 import numpy as np
@@ -15,11 +15,10 @@ import pandas as pd
 
 DISCOUNT_SAME_LEVEL = 0.40
 DISCOUNT_CROSS_LEVEL = 0.20
-_KWH_QUANTUM = Decimal("0.000001")
 
 
 class VnbBalancingPolicyRequired(ValueError):
-    """Source quantities whose rounded totals do not balance need a reviewed policy."""
+    """Unequal source totals require a reviewed balancing policy."""
 
 
 class BatteryBilledSplitMismatch(ValueError):
@@ -28,48 +27,6 @@ class BatteryBilledSplitMismatch(ValueError):
     Battery attribution is derived from the engine's interval allocation, so it
     only adds up to the billed energy when both splits agree.
     """
-
-
-def conserving_credits(raw_production, target_total):
-    """Split exactly ``target_total`` over producers by their VNB share.
-
-    The VNB's production and consumption sides of the LEG channel do not add up
-    to the same number, so crediting the production side verbatim would credit
-    energy that was never charged. The consumption side is what a member checks
-    against their own VNB statement and is billed unchanged; the producers carry
-    the residue, distributed by their share. Largest remainder closes the split
-    at 6 decimals, so the credited total equals the charged total exactly rather
-    than within a tolerance.
-    """
-    source_total = sum(raw_production.values(), Decimal(0))
-    if source_total <= 0:
-        return dict.fromkeys(raw_production, Decimal(0))
-
-    exact = {
-        participant: value / source_total * target_total
-        for participant, value in raw_production.items()
-    }
-    credited = {
-        participant: value.quantize(_KWH_QUANTUM, rounding=ROUND_DOWN)
-        for participant, value in exact.items()
-    }
-    residue = (target_total - sum(credited.values(), Decimal(0))).quantize(
-        _KWH_QUANTUM, rounding=ROUND_HALF_UP
-    )
-    # Deterministic order: largest dropped fraction first, participant id to
-    # break a tie, so the same period always credits the same way.
-    ranked = sorted(
-        credited,
-        key=lambda participant: (
-            -(exact[participant] - credited[participant]),
-            participant,
-        ),
-    )
-    steps = int(residue / _KWH_QUANTUM)
-    for offset in range(abs(steps)):
-        participant = ranked[offset % len(ranked)]
-        credited[participant] += _KWH_QUANTUM if steps > 0 else -_KWH_QUANTUM
-    return credited
 
 
 def _money(value):
@@ -319,15 +276,10 @@ def generate_vnb_billing_summary(
     network_level,
     distribution_model="proportional",
     settlement_fee_per_kwh=0.0,
-    max_imbalance_ratio=None,
 ):
     """Price source quantities after the caller's interval compatibility audit.
 
-    Balanced source totals are billed verbatim. Unequal rounded totals are
-    billed only within ``max_imbalance_ratio`` of the consumption total:
-    consumers keep their exact source quantities and the producers share
-    exactly that energy by their source share (:func:`conserving_credits`).
-    Without a ratio, or beyond it, the totals need a reviewed policy.
+    Source totals must balance exactly. Each producer keeps its source quantity.
     """
     return _generate_billing_summary(
         production,
@@ -339,7 +291,6 @@ def generate_vnb_billing_summary(
         settlement_fee_per_kwh,
         vnb_consumption=vnb_consumption,
         vnb_production=vnb_production,
-        max_imbalance_ratio=max_imbalance_ratio,
     )
 
 
@@ -358,27 +309,6 @@ def _source_quantities(frame, physical):
     return frame.map(quantity)
 
 
-def source_balance(allocation, source_credits, max_imbalance_ratio):
-    """The consumption total the credits must close on, or None if balanced.
-
-    Fails closed without a ratio, without production, or beyond the ratio.
-    """
-    consumed = sum(allocation.sum(), Decimal(0))
-    credited = sum(source_credits.sum(), Decimal(0))
-    if consumed == credited:
-        return None
-    if (
-        max_imbalance_ratio is None
-        or consumed <= 0
-        or credited <= 0
-        or abs(credited - consumed) / consumed > Decimal(str(max_imbalance_ratio))
-    ):
-        raise VnbBalancingPolicyRequired(
-            "VNB quantities require a reviewed balancing policy"
-        )
-    return consumed
-
-
 def _generate_billing_summary(
     production,
     consumption,
@@ -393,7 +323,6 @@ def _generate_billing_summary(
     vnb_consumption=None,
     vnb_production=None,
     billed_allocation=None,
-    max_imbalance_ratio=None,
 ):
     """Generate billing summary for a period.
 
@@ -459,7 +388,10 @@ def _generate_billing_summary(
             raise ValueError("VNB pricing requires participant production")
         allocation = _source_quantities(vnb_consumption, consumption)
         source_credits = _source_quantities(vnb_production, producer_production)
-        closing_total = source_balance(allocation, source_credits, max_imbalance_ratio)
+        if sum(allocation.sum(), Decimal(0)) != sum(source_credits.sum(), Decimal(0)):
+            raise VnbBalancingPolicyRequired(
+                "VNB quantities require a reviewed balancing policy"
+            )
     engine_allocation = allocate_energy(
         total_production_series, consumption, model=distribution_model
     )
@@ -503,8 +435,6 @@ def _generate_billing_summary(
             producer_id: sum(source_credits[producer_id], Decimal(0))
             for producer_id in source_credits.columns
         }
-        if closing_total is not None:
-            billed_production = conserving_credits(billed_production, closing_total)
     else:
         billed_consumption = _billed_quantities(
             billed_allocation, "consumption_kwh", engine_allocated

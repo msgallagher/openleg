@@ -107,7 +107,7 @@ def _quantities(summary, item_type):
     }
 
 
-def test_unequal_source_totals_without_a_tolerance_still_need_a_policy():
+def test_unequal_source_totals_need_a_policy():
     import billing_engine
 
     frames = _unbalanced("0.501", "0.501")
@@ -116,46 +116,11 @@ def test_unequal_source_totals_without_a_tolerance_still_need_a_policy():
         _vnb_summary(frames)
     except billing_engine.VnbBalancingPolicyRequired:
         return
-    raise AssertionError("unequal totals must not be priced without a tolerance")
+    raise AssertionError("unequal totals must not be priced")
 
 
-def test_within_the_tolerance_the_credits_carry_the_source_residue():
-    """1.002 kWh credited against 1.000 kWh charged: 0.2%, inside a 0.5% release.
-
-    Consumers are billed the exact source decimals. The producers share
-    exactly the charged energy by their source share, so nobody is credited
-    for energy nobody paid for.
-    """
-    summary = _vnb_summary(
-        _unbalanced("0.601", "0.401"), max_imbalance_ratio=Decimal("0.005")
-    )
-
-    charges = _quantities(summary, "consumer_charge")
-    credits = _quantities(summary, "producer_credit")
-    assert charges["a"] == Decimal("0.333")
-    assert charges["b"] == Decimal("0.667")
-    assert sum(credits.values()) == sum(charges.values()) == Decimal("1.000")
-    assert credits["p"] == Decimal("0.599800")
-    assert credits["q"] == Decimal("0.400200")
-    assert credits["a"] == credits["b"] == Decimal(0)
-
-
-def test_beyond_the_tolerance_the_source_still_needs_a_policy():
-    import billing_engine
-
-    frames = _unbalanced("0.601", "0.401")
-
-    try:
-        _vnb_summary(frames, max_imbalance_ratio=Decimal("0.001"))
-    except billing_engine.VnbBalancingPolicyRequired:
-        return
-    raise AssertionError("an imbalance above the tolerance must not be priced")
-
-
-def test_balanced_source_totals_are_billed_verbatim_under_any_tolerance():
-    summary = _vnb_summary(
-        _unbalanced("0.600", "0.400"), max_imbalance_ratio=Decimal("0.005")
-    )
+def test_balanced_source_totals_are_billed_verbatim():
+    summary = _vnb_summary(_unbalanced("0.600", "0.400"))
 
     credits = _quantities(summary, "producer_credit")
     assert credits["p"] == Decimal("0.6")

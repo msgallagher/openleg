@@ -75,7 +75,6 @@ def test_cron_identifies_a_missing_billing_tariff(app_with_cron_secret, monkeypa
         "vnb_evidence_missing",
         "metering_readings_invalid",
         "vnb_allocation_mismatch",
-        "vnb_imbalance_exceeds_tolerance",
         "billing_inputs_changed",
         "battery_configuration_invalid",
         "billing_store_unavailable",
@@ -85,14 +84,7 @@ def test_cron_identifies_a_missing_billing_tariff(app_with_cron_secret, monkeypa
 def test_cron_reports_known_blockers_without_persisting(
     app_with_cron_secret, monkeypatch, blocker
 ):
-    saved = test_billing_runner._install_billing_fixture(
-        monkeypatch,
-        consumption_community_kwh=(
-            test_billing_runner._SLIGHTLY_UNBALANCED
-            if blocker == "vnb_imbalance_exceeds_tolerance"
-            else 0.5
-        ),
-    )
+    saved = test_billing_runner._install_billing_fixture(monkeypatch)
     monkeypatch.setattr(
         database, "get_active_communities", lambda: [{"community_id": "c1"}]
     )
@@ -297,6 +289,6 @@ def test_cron_identifies_the_original_unbalanced_source_without_issuing(
     assert response.status_code == 200
     assert response.json["processed"] == 0
     assert response.json["failures"] == [
-        {"community_id": "c1", "error": "vnb_imbalance_exceeds_tolerance"}
+        {"community_id": "c1", "error": "metering_readings_invalid"}
     ]
     assert saved == []

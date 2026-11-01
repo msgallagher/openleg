@@ -63,21 +63,16 @@ def accepted_split(monkeypatch):
     )
     monkeypatch.setattr(db, "get_battery", MagicMock(return_value=None))
     monkeypatch.setattr(
-        db, "get_billing_imbalance_release", MagicMock(return_value=None)
-    )
-    monkeypatch.setattr(
         db, "get_billable_period_snapshot", MagicMock(return_value=snapshot)
     )
     fetched = MagicMock(return_value=delivery)
     saved = MagicMock(return_value=42)
-    blocked = MagicMock()
     monkeypatch.setattr(db, "get_validated_calculated_values", fetched)
     monkeypatch.setattr(
         db, "get_billing_period_for_window", MagicMock(return_value=None)
     )
     monkeypatch.setattr(db, "save_billing_period", saved)
-    monkeypatch.setattr(db, "record_billing_imbalance_block", blocked)
-    return delivery, snapshot, fetched, saved, blocked
+    return delivery, snapshot, fetched, saved
 
 
 def _raw_production(snapshot, local):
@@ -96,7 +91,7 @@ def _run(delivery):
 def test_runner_bills_the_balanced_accepted_split_despite_raw_residue(
     accepted_split, raw_local
 ):
-    delivery, snapshot, fetched, saved, blocked = accepted_split
+    delivery, snapshot, fetched, saved = accepted_split
     _raw_production(snapshot, raw_local)
 
     assert _run(delivery) == {"status": "created", "period_id": 42}
@@ -115,14 +110,13 @@ def test_runner_bills_the_balanced_accepted_split_despite_raw_residue(
             for row in summary["line_items"]
             if row["item_type"] == kind
         ) == Decimal("1.000")
-    blocked.assert_not_called()
 
 
 @pytest.mark.parametrize("raw_local", ["1.001", "1.003"])
 def test_missing_accepted_source_refuses_even_when_raw_split_is_bad(
     accepted_split, raw_local
 ):
-    delivery, snapshot, fetched, saved, blocked = accepted_split
+    delivery, snapshot, fetched, saved = accepted_split
     _raw_production(snapshot, raw_local)
     fetched.return_value = None
 
@@ -131,12 +125,11 @@ def test_missing_accepted_source_refuses_even_when_raw_split_is_bad(
 
     assert error.value.code == "vnb_evidence_missing"
     saved.assert_not_called()
-    blocked.assert_not_called()
 
 
 def _unbalanced_replacement(delivery, snapshot):
     # This vector is still rounding-compatible; its 0.999/1.000 accepted
-    # split exceeds the default tolerance and must supply the persisted figures.
+    # split is unequal and must refuse even when the imported split differs.
     delivery.update(
         evidence(
             [
@@ -163,49 +156,16 @@ def _unbalanced_replacement(delivery, snapshot):
     )
 
 
-def test_unbalanced_accepted_replacement_records_its_own_block(accepted_split):
-    delivery, snapshot, _, saved, blocked = accepted_split
+def test_unbalanced_accepted_replacement_refuses_its_own_quantities(accepted_split):
+    delivery, snapshot, _, saved = accepted_split
     _unbalanced_replacement(delivery, snapshot)
 
     with pytest.raises(billing_runner.BillingRunError) as error:
         _run(delivery)
 
-    assert error.value.code == "vnb_imbalance_exceeds_tolerance"
+    assert error.value.code == "vnb_allocation_mismatch"
+    assert error.value.reason == "vnb_balancing_policy_required"
     saved.assert_not_called()
-    blocked.assert_called_once_with(
-        COMMUNITY,
-        delivery["period_start"],
-        delivery["period_end"],
-        {
-            "community_consumption_kwh": Decimal("0.999000"),
-            "community_production_kwh": Decimal("1.000000"),
-            "imbalance_kwh": Decimal("0.001000"),
-            "imbalance_ratio": Decimal("0.001002"),
-            "tolerance_ratio": Decimal("0.001"),
-        },
-    )
-
-
-def test_period_release_applies_to_accepted_split_not_the_larger_raw_gap(
-    accepted_split,
-):
-    delivery, snapshot, _, saved, blocked = accepted_split
-    _unbalanced_replacement(delivery, snapshot)
-    release = {
-        "id": 7,
-        "max_imbalance_ratio": Decimal("0.002000"),
-        "reason": "Synthetic VNB ticket 4711",
-        "released_by": "preparer",
-        "released_at": delivery["period_end"],
-    }
-    billing_runner.db.get_billing_imbalance_release.return_value = release
-
-    assert _run(delivery) == {"status": "created", "period_id": 42}
-
-    reconciliation = saved.call_args.args[3]["reconciliation"]
-    assert reconciliation["vnb_imbalance_tolerance_ratio"] == 0.002
-    assert reconciliation["vnb_imbalance_release"]["id"] == 7
-    blocked.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -221,7 +181,7 @@ def test_period_release_applies_to_accepted_split_not_the_larger_raw_gap(
 def test_accepted_source_safeguards_still_refuse_after_raw_gate_is_deferred(
     accepted_split, fault, message, raw_local
 ):
-    delivery, snapshot, _, saved, _ = accepted_split
+    delivery, snapshot, _, saved = accepted_split
     _raw_production(snapshot, raw_local)
     if fault == "physical":
         snapshot["readings"][0]["total_kwh"] += Decimal("0.001")
@@ -243,7 +203,7 @@ def test_accepted_source_safeguards_still_refuse_after_raw_gate_is_deferred(
 
 @pytest.mark.parametrize("fault", ["missing_interval", "unconfirmed", "provenance"])
 def test_corrected_split_does_not_bypass_raw_frame_validation(accepted_split, fault):
-    delivery, snapshot, _, saved, _ = accepted_split
+    delivery, snapshot, _, saved = accepted_split
     _raw_production(snapshot, "1.003")
     if fault == "missing_interval":
         snapshot["readings"].pop(0)
@@ -256,12 +216,12 @@ def test_corrected_split_does_not_bypass_raw_frame_validation(accepted_split, fa
     with pytest.raises(billing_runner.BillingRunError) as error:
         _run(delivery)
 
-    assert error.value.code != "vnb_imbalance_exceeds_tolerance"
+    assert error.value.reason is None
     saved.assert_not_called()
 
 
 def test_direct_e66_loader_still_gates_unbalanced_raw_split(accepted_split):
-    delivery, snapshot, _, saved, _ = accepted_split
+    delivery, snapshot, _, saved = accepted_split
     _raw_production(snapshot, "1.003")
 
     with pytest.raises(billing_readings.PeriodDataError) as error:
@@ -276,7 +236,7 @@ def test_direct_e66_loader_still_gates_unbalanced_raw_split(accepted_split):
 def test_naive_runner_bounds_are_swiss_local_before_accepted_source_lookup(
     accepted_split,
 ):
-    delivery, snapshot, fetched, _, _ = accepted_split
+    delivery, snapshot, fetched, _ = accepted_split
     _raw_production(snapshot, "1.003")
     bounds = [
         delivery[key].astimezone(ZoneInfo("Europe/Zurich"))
@@ -293,7 +253,7 @@ def test_naive_runner_bounds_are_swiss_local_before_accepted_source_lookup(
 
 @pytest.mark.parametrize("status", ["rejected", "partially_invalid", None])
 def test_loader_never_promotes_an_unaccepted_delivery(accepted_split, status):
-    delivery, snapshot, _, saved, _ = accepted_split
+    delivery, snapshot, _, saved = accepted_split
     _raw_production(snapshot, "1.003")
     delivery["status"] = status
 

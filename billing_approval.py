@@ -9,7 +9,6 @@ outside the policy value domains of ``billing_policy`` is refused with
 :class:`BillingApprovalError`.
 """
 
-import json
 import re
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
@@ -36,108 +35,6 @@ _ENERGY_ITEM_TYPES = ("consumer_charge", "producer_credit")
 
 class BillingApprovalError(RuntimeError):
     """A billing draft is incomplete, unreconciled, malformed, or not approvable."""
-
-
-def imbalance_release(period):
-    """The tolerance release frozen on this draft, or None."""
-    reconciliation = period.get("reconciliation")
-    if isinstance(reconciliation, str):
-        try:
-            reconciliation = json.loads(reconciliation)
-        except ValueError:
-            return None
-    if not isinstance(reconciliation, dict):
-        return None
-    release = reconciliation.get("vnb_imbalance_release")
-    return release if isinstance(release, dict) else None
-
-
-def imbalance_released_by(period):
-    """Who raised the imbalance tolerance this draft was billed under, if anyone.
-
-    Raising it is a preparing decision of its own, so dual control keeps that
-    person from approving the draft even after someone else re-prepared it.
-    """
-    release = imbalance_release(period)
-    return release.get("released_by") if release else None
-
-
-def _require_documented_tolerance(reconciliation):
-    """A tolerance above the default needs the release that raised it.
-
-    Dual control reads the releaser from that release, so a raised tolerance
-    without it, or with a different ratio, would let anyone approve it.
-    """
-    import billing_readings
-
-    frozen = reconciliation.get("vnb_imbalance_tolerance_ratio")
-    release = reconciliation.get("vnb_imbalance_release")
-    if frozen is None and release is None:
-        return
-    try:
-        tolerance = billing_readings.imbalance_tolerance(frozen)
-        # The draft's own record must stay within the tolerance it froze.
-        if Decimal(str(reconciliation.get("vnb_imbalance_ratio", 0))) > tolerance:
-            raise BillingApprovalError(
-                "Die Abweichung dieses Entwurfs übersteigt seine Toleranz."
-            )
-        if (
-            tolerance <= billing_readings.DEFAULT_VNB_IMBALANCE_RATIO
-            and release is None
-        ):
-            return
-        released_at = datetime.fromisoformat(release["released_at"])
-        if (
-            type(release["id"]) is int
-            and release["id"] > 0
-            and all(
-                isinstance(release[key], str) and release[key].strip()
-                for key in ("released_by", "reason")
-            )
-            and released_at.tzinfo is not None
-            and released_at.utcoffset() is not None
-            and Decimal(str(release["max_imbalance_ratio"])) == tolerance
-        ):
-            return
-    except (ArithmeticError, KeyError, TypeError, ValueError):
-        pass
-    raise BillingApprovalError(
-        "Die angehobene Toleranz dieses Entwurfs ist nicht belegt."
-    )
-
-
-def validate_imbalance_release(period, persisted_release):
-    """Validate frozen release evidence against the row locked by approval."""
-    reconciliation = period.get("reconciliation")
-    if not isinstance(reconciliation, dict):
-        raise BillingApprovalError("Der Entwurf hat keinen gültigen Abgleich.")
-    _require_documented_tolerance(reconciliation)
-    release = imbalance_release(period)
-    if release is None:
-        return None
-    message = "Die Toleranzfreigabe dieses Entwurfs stimmt nicht mit dem Beleg überein."
-    try:
-        if not isinstance(persisted_release, dict) or any(
-            persisted_release[key] != release[key]
-            for key in ("id", "released_by", "reason")
-        ):
-            raise BillingApprovalError(message)
-        if (
-            persisted_release["community_id"] != period["community_id"]
-            or Decimal(str(persisted_release["max_imbalance_ratio"]))
-            != Decimal(str(release["max_imbalance_ratio"]))
-            or _parse_temporal(persisted_release["released_at"], message)
-            != _parse_temporal(release["released_at"], message)
-            or any(
-                _parse_temporal(persisted_release[key], message)
-                != _parse_temporal(period[key], message)
-                for key in ("period_start", "period_end")
-            )
-        ):
-            raise BillingApprovalError(message)
-    except (ArithmeticError, KeyError, TypeError, ValueError):
-        raise BillingApprovalError(message) from None
-    return persisted_release["released_by"]
 
 
 def today():
@@ -901,6 +798,13 @@ def prepare_invoice_snapshots(period, issue_date=None, *, calculated_values=None
         period.get("line_items"), internal_price, settlement_fee
     )
     reconciliation = period.get("reconciliation")
+    if isinstance(reconciliation, dict) and any(
+        reconciliation.get(key) is not None
+        for key in ("vnb_imbalance_release", "vnb_imbalance_tolerance_ratio")
+    ):
+        raise BillingApprovalError(
+            "Der Entwurf enthält eine veraltete Toleranzregel. Erstellen Sie ihn neu."
+        )
     vnb_basis = (
         isinstance(reconciliation, dict) and "precision_policy" in reconciliation
     )
@@ -926,7 +830,6 @@ def prepare_invoice_snapshots(period, issue_date=None, *, calculated_values=None
     _require_canonical_reconciliation(
         reconciliation, consumption_kwh, production_kwh, vnb_basis=vnb_basis
     )
-    _require_documented_tolerance(reconciliation)
     _require_battery_cost_shares(
         period, community_id, line_items, consumption_kwh, production_kwh
     )
@@ -940,19 +843,6 @@ def prepare_invoice_snapshots(period, issue_date=None, *, calculated_values=None
         "period_start": _json_safe(period.get("period_start")),
         "period_end": _json_safe(period.get("period_end")),
     }
-    if isinstance(reconciliation.get("vnb_imbalance_release"), dict):
-        # The ratio and its record suffice on a member's invoice; who raised it
-        # and their free-text reason stay with the draft. Redacted once here,
-        # since every participant's reconciliation is built from this one.
-        release = reconciliation["vnb_imbalance_release"]
-        provenance["reconciliation"] = {
-            **provenance["reconciliation"],
-            "vnb_imbalance_release": {
-                key: _json_safe(release[key])
-                for key in ("id", "max_imbalance_ratio")
-                if key in release
-            },
-        }
     snapshots = []
     for participant_id in sorted({item["participant_id"] for item in line_items}):
         items = [

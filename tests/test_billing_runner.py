@@ -779,12 +779,6 @@ def _install_billing_fixture(
         "save_billing_period",
         lambda *args: saved.append(args) or 42,
     )
-    monkeypatch.setattr(
-        database,
-        "get_billing_imbalance_release",
-        lambda _community, _start, _end: None,
-        raising=False,
-    )
     return saved
 
 
@@ -806,198 +800,16 @@ def test_a_vnb_delivery_that_does_not_balance_refuses_to_persist(monkeypatch):
     assert saved == [], "a period the VNB contradicts must never reach the database"
 
 
-# Three intervals, 0.499 kWh against 0.5 kWh: the VNB sides differ by
-# 0.003 kWh on 1.497 kWh, about 0.2%. Above the 0.1% default, below the 2% cap.
-_SLIGHTLY_UNBALANCED = 0.499
-_RELEASE = {
-    "id": 7,
-    "max_imbalance_ratio": Decimal("0.005"),
-    "reason": "BKW Ticket 4711",
-    "released_by": "admin-a",
-    "released_at": datetime(2026, 9, 3, 10, 0, tzinfo=ZoneInfo("Europe/Zurich")),
-}
-
-
-def _blocks(monkeypatch, release=None):
-    import billing_runner
-
-    recorded = []
-    monkeypatch.setattr(billing_runner, "_imbalance_release", lambda *_args: release)
-    monkeypatch.setattr(
-        billing_runner,
-        "_record_imbalance_block",
-        lambda *args: recorded.append(args),
-    )
-    return recorded
-
-
-def test_an_imbalance_above_the_default_blocks_the_period_with_its_figures(
-    monkeypatch,
-):
-    """The run stops, and keeps the figures the workspace shows the LEG."""
-    from billing_runner import BillingRunError, run_billing_period
-
-    saved = _install_billing_fixture(
-        monkeypatch, consumption_community_kwh=_SLIGHTLY_UNBALANCED
-    )
-    recorded = _blocks(monkeypatch)
-
-    with pytest.raises(BillingRunError) as blocked:
-        run_billing_period(COMMUNITY, START, END)
-
-    assert blocked.value.code == "vnb_imbalance_exceeds_tolerance"
-    assert saved == []
-    ((community_id, start, end, figures),) = recorded
-    assert (community_id, start, end) == (COMMUNITY, START, END)
-    assert figures["imbalance_kwh"] == Decimal("0.003000")
-    assert figures["imbalance_ratio"] == Decimal("0.002005")
-    assert figures["tolerance_ratio"] == Decimal("0.001")
-
-
-def test_a_released_tolerance_bills_the_period_and_is_frozen(monkeypatch):
-    """Who raised the tolerance, why, and to what, stays on the draft."""
-    from billing_runner import run_billing_period
-
-    saved = _install_billing_fixture(
-        monkeypatch, consumption_community_kwh=_SLIGHTLY_UNBALANCED
-    )
-    recorded = _blocks(monkeypatch, release=_RELEASE)
-
-    assert run_billing_period(COMMUNITY, START, END)["status"] == "created"
-
-    assert recorded == []
-    reconciliation = saved[0][3]["reconciliation"]
-    assert reconciliation["vnb_imbalance_tolerance_ratio"] == 0.005
-    assert reconciliation["vnb_imbalance_release"] == {
-        "id": 7,
-        "max_imbalance_ratio": "0.005",
-        "reason": "BKW Ticket 4711",
-        "released_by": "admin-a",
-        "released_at": "2026-09-03T10:00:00+02:00",
-    }
-
-
-def test_a_release_below_the_measured_imbalance_still_blocks(monkeypatch):
-    from billing_runner import BillingRunError, run_billing_period
-
-    _install_billing_fixture(
-        monkeypatch, consumption_community_kwh=_SLIGHTLY_UNBALANCED
-    )
-    recorded = _blocks(
-        monkeypatch, release={**_RELEASE, "max_imbalance_ratio": Decimal("0.0015")}
-    )
-
-    with pytest.raises(BillingRunError) as blocked:
-        run_billing_period(COMMUNITY, START, END)
-
-    assert blocked.value.code == "vnb_imbalance_exceeds_tolerance"
-    assert recorded[0][3]["tolerance_ratio"] == Decimal("0.0015")
-
-
-def test_a_balanced_period_carries_the_default_and_no_release(monkeypatch):
-    from billing_runner import run_billing_period
-
-    saved = _install_billing_fixture(monkeypatch)
-    _blocks(monkeypatch)
-
-    run_billing_period(COMMUNITY, START, END)
-
-    reconciliation = saved[0][3]["reconciliation"]
-    assert reconciliation["vnb_imbalance_tolerance_ratio"] == 0.001
-    assert "vnb_imbalance_release" not in reconciliation
-
-
-def test_a_block_that_cannot_be_recorded_still_reports_the_imbalance(monkeypatch):
-    """The imbalance is the reason the run stopped, not the bookkeeping."""
-    import billing_runner
-
-    _install_billing_fixture(
-        monkeypatch, consumption_community_kwh=_SLIGHTLY_UNBALANCED
-    )
-    monkeypatch.setattr(billing_runner, "_imbalance_release", lambda *_args: None)
-
-    def unavailable(*_args):
-        raise database.BillingStoreError("down")
-
-    monkeypatch.setattr(billing_runner, "_record_imbalance_block", unavailable)
-
-    with pytest.raises(billing_runner.BillingRunError) as blocked:
-        billing_runner.run_billing_period(COMMUNITY, START, END)
-
-    assert blocked.value.code == "vnb_imbalance_exceeds_tolerance"
-
-
-def test_a_window_with_a_live_draft_records_no_block(monkeypatch):
-    """A draft billed under an earlier rule must not reappear as blocked."""
-    from billing_runner import BillingRunError, run_billing_period
-
-    _install_billing_fixture(
-        monkeypatch, consumption_community_kwh=_SLIGHTLY_UNBALANCED
-    )
-    monkeypatch.setattr(
-        database,
-        "get_billing_period_for_window",
-        lambda *_args: {"id": 5, "input_fingerprint": "a" * 64},
-    )
-    recorded = _blocks(monkeypatch)
-
-    with pytest.raises(BillingRunError) as blocked:
-        run_billing_period(COMMUNITY, START, END)
-
-    assert blocked.value.code == "vnb_imbalance_exceeds_tolerance"
-    assert recorded == []
-
-
-def test_a_failing_draft_lookup_still_reports_the_imbalance(monkeypatch):
-    """The lookup only decides whether to record a block; it never masks the stop."""
-    import psycopg2.pool
-
-    from billing_runner import BillingRunError, run_billing_period
-
-    _install_billing_fixture(
-        monkeypatch, consumption_community_kwh=_SLIGHTLY_UNBALANCED
-    )
-    monkeypatch.setattr(database, "is_db_available", lambda: True)
-    snapshot = database.get_billable_period_snapshot(COMMUNITY, START, END)
-    monkeypatch.setattr(
-        database,
-        "get_validated_calculated_values",
-        lambda *_args: {
-            "status": "accepted",
-            "normalized_records": [
-                {
-                    "participant_id": "building-a",
-                    "direction": row["direction"],
-                    "allocated_kwh": row["community_kwh"],
-                }
-                for row in snapshot["readings"]
-            ],
-        },
-    )
-
-    def exhausted(*_args):
-        raise psycopg2.pool.PoolError("connection pool exhausted")
-
-    monkeypatch.setattr(database, "get_billing_period_for_window", exhausted)
-    _blocks(monkeypatch)
-
-    with pytest.raises(BillingRunError) as blocked:
-        run_billing_period(COMMUNITY, START, END)
-
-    assert blocked.value.code == "vnb_imbalance_exceeds_tolerance"
-
-
 @pytest.mark.parametrize(
     ("prepared_by", "stored"), [("admin-a", {"prepared_by": "admin-a"}), (None, {})]
 )
 def test_a_named_preparer_is_stored_and_automated_runs_leave_it_unset(
     monkeypatch, prepared_by, stored
 ):
-    """The releaser prepared the draft; a cron draft waits for a human to submit."""
+    """A named preparer persists; automated runs wait for a human to submit."""
     from billing_runner import run_billing_period
 
     _install_billing_fixture(monkeypatch)
-    _blocks(monkeypatch)
     calls = []
     monkeypatch.setattr(
         database,
@@ -1008,41 +820,6 @@ def test_a_named_preparer_is_stored_and_automated_runs_leave_it_unset(
     run_billing_period(COMMUNITY, START, END, prepared_by=prepared_by)
 
     assert calls == [stored]
-
-
-def test_releases_and_blocks_need_a_database(monkeypatch):
-    """Unit and demo configurations run without a pool: no release, no block."""
-    import billing_runner
-
-    monkeypatch.setattr(database, "is_db_available", lambda: False)
-
-    def unreachable(*_args):
-        raise AssertionError("no database configured")
-
-    monkeypatch.setattr(database, "get_billing_imbalance_release", unreachable)
-    monkeypatch.setattr(database, "record_billing_imbalance_block", unreachable)
-
-    assert billing_runner._imbalance_release(COMMUNITY, START, END) is None
-    billing_runner._record_imbalance_block(COMMUNITY, START, END, {})
-
-
-def test_releases_and_blocks_use_the_database_when_there_is_one(monkeypatch):
-    import billing_runner
-
-    recorded = []
-    monkeypatch.setattr(database, "is_db_available", lambda: True)
-    monkeypatch.setattr(
-        database, "get_billing_imbalance_release", lambda *_args: _RELEASE
-    )
-    monkeypatch.setattr(
-        database,
-        "record_billing_imbalance_block",
-        lambda *args: recorded.append(args),
-    )
-
-    assert billing_runner._imbalance_release(COMMUNITY, START, END) == _RELEASE
-    billing_runner._record_imbalance_block(COMMUNITY, START, END, {"a": 1})
-    assert recorded == [(COMMUNITY, START, END, {"a": 1})]
 
 
 def test_operational_billing_requires_accepted_calculated_values(monkeypatch):
@@ -1391,12 +1168,6 @@ def _install_battery_fixture(monkeypatch, case, battery):
         "save_billing_period",
         lambda *_args: saved.append(_args) or 42,
     )
-    monkeypatch.setattr(
-        database,
-        "get_billing_imbalance_release",
-        lambda *_args: None,
-        raising=False,
-    )
     return saved
 
 
@@ -1447,7 +1218,7 @@ def test_battery_cost_share_lines_enter_the_draft_and_snapshot(monkeypatch):
 
 
 def test_utc_bounds_freeze_the_same_draft_as_local_bounds(monkeypatch):
-    """A release run gets PostgreSQL's UTC bounds; the cron passes local ones."""
+    """Stored PostgreSQL bounds are UTC; the cron passes local ones."""
     from billing_runner import run_billing_period
 
     utc = ZoneInfo("UTC")

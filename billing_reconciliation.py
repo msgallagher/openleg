@@ -382,49 +382,40 @@ def validate_billed_source(
             raise ReconciliationError("source_identity_mismatch")
         policy = period["billing_policy_snapshot"]
         reconciliation = period["reconciliation"]
-        # The tolerance the draft was billed under; drafts from before
-        # per-period tolerances carry none and keep the exact-balance rule.
-        frozen_tolerance = reconciliation.get("vnb_imbalance_tolerance_ratio")
-        tolerance = (
-            Decimal(str(frozen_tolerance)) if frozen_tolerance is not None else None
-        )
         if require_certificate:
             certificate = audit_e66(delivery, model=policy["distribution_model"])
             if reconciliation["precision_policy"] != certificate or period.get(
                 "battery_snapshot"
             ):
                 raise ReconciliationError("source_certificate_mismatch")
-        source_frames = billing_readings.frames_from_calculated_source(
-            delivery, max_imbalance_ratio=tolerance
-        )
+        try:
+            source_frames = billing_readings.frames_from_calculated_source(delivery)
+        except billing_readings.PeriodDataError as exc:
+            if any(problem["kind"] == "vnb_imbalance" for problem in exc.problems):
+                raise ReconciliationError("source_quantity_mismatch") from None
+            raise
         source_consumption, source_production = (
             billing_readings.calculated_quantity_frames(source_frames, delivery)
         )
         expected_consumption, expected_production = (
             {
-                participant: sum(frame[participant], Decimal(0))
+                participant: sum(
+                    (Fraction(value) for value in frame[participant]), Fraction(0)
+                )
                 for participant in frame.columns
             }
             for frame in (source_consumption, source_production)
         )
-        try:
-            closing_total = billing_engine.source_balance(
-                source_consumption, source_production, tolerance
-            )
-        except billing_engine.VnbBalancingPolicyRequired:
-            raise ReconciliationError("source_quantity_mismatch") from None
-        if closing_total is not None:
-            # Within the frozen tolerance the producers carry the residue,
-            # exactly as the runner priced it.
-            expected_production = billing_engine.conserving_credits(
-                expected_production, closing_total
-            )
+        if sum(expected_consumption.values(), Fraction(0)) != sum(
+            expected_production.values(), Fraction(0)
+        ):
+            raise ReconciliationError("source_quantity_mismatch")
         for expected, billed in (
             (expected_consumption, consumption_kwh),
             (expected_production, production_kwh),
         ):
             if set(expected) != set(billed) or any(
-                Fraction(expected[participant]) != Fraction(billed[participant])
+                expected[participant] != Fraction(billed[participant])
                 for participant in expected
             ):
                 raise ReconciliationError("source_quantity_mismatch")
@@ -438,18 +429,16 @@ def validate_billed_source(
             settlement_fee_per_kwh=policy["settlement_fee_chf_per_kwh"],
         )
         expected = billing_readings.reconcile_with_vnb(source_frames, independent)
-        if frozen_tolerance is None:
-            # Main 43f8826 stored none of these fields. Only their absence is
-            # compatible; a present field must still match the source audit.
-            for key in (
-                "vnb_imbalance_tolerance_ratio",
-                "engine_audit",
-                "vnb_delivered_production_kwh",
-                "vnb_imbalance_kwh",
-                "vnb_imbalance_ratio",
-            ):
-                if key not in reconciliation:
-                    expected.pop(key, None)
+        # Main stored none of these audit fields. Absence stays compatible;
+        # a present field must agree with the independent source audit.
+        for key in (
+            "engine_audit",
+            "vnb_delivered_production_kwh",
+            "vnb_imbalance_kwh",
+            "vnb_imbalance_ratio",
+        ):
+            if key not in reconciliation:
+                expected.pop(key, None)
         if any(reconciliation.get(key) != value for key, value in expected.items()):
             raise ReconciliationError("independent_audit_mismatch")
     except ReconciliationError:

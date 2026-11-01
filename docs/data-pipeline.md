@@ -192,8 +192,7 @@ Each pair of metering point and direction carries three channels:
 
 `total = grid + community` holds. The LEG channel balances across the
 community: what production points feed into the LEG, consumption points draw
-from it. It balances to within a rounding residue, not exactly; see "Units and
-directions" for what billing does with the difference.
+from it. Billing requires these source totals to balance exactly.
 
 Observations carry no timestamp of their own. It follows from the interval
 start of the block plus `(Sequence - 1) * resolution` and marks the **start**
@@ -250,76 +249,41 @@ VNB statement shows. The billing engine reallocates totals only as an audit
 calculation, reported under `engine_audit` and never billed. A missing VNB split
 blocks the draft period.
 
-The two VNB sides do not add up to the same number. Each side is rounded per
-interval, so a month's community production exceeds its community consumption by
-a few hundredths of a percent (0.02% to 0.05% over the first four Schwarzenburg
-months). Crediting the production side verbatim would pay producers for energy
-nobody was charged for, so the consumption side is billed unchanged and the
-credits are distributed over exactly that same energy, by each producer's share
-of the VNB's community production. Largest remainder closes the split at 6
-decimals, so charged and credited energy match exactly rather than within a
-tolerance, which is what `billing_approval` requires. The delivered figures and
-the residue stay on the draft as `vnb_delivered_production_kwh` and
-`vnb_imbalance_kwh`.
+Consumer and producer community totals must balance exactly before any display
+or line-quantity rounding. A nonzero difference stops billing, including one
+smaller than the six-decimal display precision. There is no allowance or
+operator exception, and producer quantities are never rescaled or redistributed.
+Zero/zero energy remains valid. The delivered figures and independent model
+allocation remain visible in the reconciliation and `engine_audit`.
 
-Above `billing_readings.DEFAULT_VNB_IMBALANCE_RATIO` (0.1% of community
-consumption) the difference is treated as a defect in the delivery, not a
-rounding residue. The period fails closed with a `vnb_imbalance` problem rather
-than distributing it, and the cron reports `vnb_imbalance_exceeds_tolerance`.
-The run keeps the figures of that stop in `billing_imbalance_blocks`, and the
-billing workspace lists every blocked period with both VNB sides, the
-difference and the tolerance it was measured against. The LEG can then ask the
-VNB for a corrected delivery; above the 2% cap that is the only way, and the
-workspace offers no release.
+With a database, the runner fetches the accepted calculated delivery before
+checking the allocation balance. Its accepted split supplies both consumer
+charges and producer credits. A balanced accepted correction can therefore
+replace an unequal imported E66 split. The imported rows still supply physical
+readings and must pass completeness, ownership and provenance checks; source
+identity and physical equality are checked against the accepted delivery.
 
-Alternatively, a billing preparer can raise the tolerance for exactly that
-period. The release needs a reason, must cover the measured difference and may
-not exceed `MAX_RELEASED_VNB_IMBALANCE_RATIO` (2%); the schema enforces the same
-range. Releases are insert-only in `billing_imbalance_releases`, and the newest
-one of a window applies. Saving a release starts the run for that period right
-away instead of waiting for the next cron run. If the run still fails, the
-release stays: the cron applies it when it reruns the previous month, and for
-older windows the preparer saves the release again once the cause is fixed.
-Every draft freezes the tolerance it was billed under as
-`vnb_imbalance_tolerance_ratio`, and, when raised, the release with its reason
-and author as `vnb_imbalance_release`, which the workspace shows on the draft
-so the approver sees the raised tolerance before approving. Raising it is a
-preparing decision: when the immediate run succeeds the releaser is recorded as
-the draft's preparer, while a draft the cron creates later has no preparer until
-someone submits it.
-Either way, under dual control approval refuses the releaser, read from the
-frozen release, even after someone else re-prepared the draft. Approval also
-refuses a draft whose recorded imbalance exceeds its frozen tolerance, or whose
-tolerance exceeds the default without a frozen release of exactly that ratio. Member invoices keep only the release's id and ratio; its
-author and reason stay with the draft. The tolerance only gates the period; the residue is distributed the same
-way at any tolerance. A period where the VNB allocated energy to only one side,
-consumers or producers, fails closed whatever the tolerance. A window that
-already has a live draft records no block. With a database, the run bills the
-accepted calculated delivery rather than the imported E66 split, so the check
-applies to that delivery's split; the imported split no longer stops the run.
+An accepted, certified `e66/1` delivery without a battery is priced from its
+source decimals for both proportional and einfach models. Precision compatibility
+alone does not authorize unequal totals. Approval rechecks the exact source
+quantities, certificate and independent engine audit. Genuine main drafts that
+lack newer audit fields remain compatible; present audit fields must match.
+Historic proposal drafts with unequal source quantities cannot be approved.
+A draft carrying an obsolete non-null allowance or release record must be prepared again;
+its free-text reason must not reach invoice provenance.
 
-A period on the precision policy below (an accepted `e66/1` delivery, no
-battery) is priced from the exact source decimals instead, under the same
-tolerance and the same rule: consumers keep their exact source quantities and
-the producers share exactly that energy by their source share
-(`billing_engine.conserving_credits`). Its reconciliation keeps the engine's own
-allocation beside the source quantities, which approval re-derives. Approval also
-recomputes the credits from the source and the tolerance frozen in the draft.
-Drafts without a frozen tolerance keep the exact-balance rule. Its differences
-to the engine are expected, so the workspace treats such a draft as reconciled
-when they are readable, and labels it as billed from the exact source rather
-than as fully balanced.
-On this path the reconciliation's own `difference_kwh` fields carry the gap
-between source and engine; its `engine_audit` is built from the engine's own
-allocation and so shows no differences. The other path reports that gap in
-`engine_audit` beside the billed quantities.
+For certified source pricing, the reconciliation's `difference_kwh` fields
+report the source/model gap. Its `engine_audit` comes from the independent
+engine allocation and has zero differences. The other billing path reports
+the source/model gap in `engine_audit` beside the billed quantities. The
+workspace labels certified source drafts accordingly; approval validates the
+source rather than requiring the model to reproduce its rounded quantities.
 
-A period with a Quartierakku still requires the VNB split to equal the engine
-allocation at 6 decimals, for consumption and production alike. The battery
-attribution is derived from the engine's interval allocation, so a differing
-split would freeze battery shares that do not add up to the billed energy;
-such a period stops with `vnb_allocation_mismatch` until attribution can follow
-the billed split.
+A period with a Quartierakku requires the accepted VNB split to equal the engine
+allocation at six decimals for every interval, participant and direction.
+Period totals cannot hide a transfer between solar and battery energy. A
+mismatch stops billing with `vnb_allocation_mismatch` until attribution can
+follow the billed split.
 
 ### Timezone semantics
 
@@ -431,10 +395,10 @@ search refuses unresolved boundaries.
 
 Physical reading frames must match the accepted source at the existing
 six-decimal persistence precision. Consumer charges, producer credits and
-settlement fees use the VNB quantities. Unequal rounded consumer and producer
-totals are billed only within the period's imbalance tolerance, with the
-producers carrying the residue as described under the VNB split above; beyond
-it the period stops. The cash rounding line never absorbs an energy difference. Battery rounding remains subject to
+settlement fees use the VNB quantities. Consumer and producer source totals
+must balance exactly over the period. Unequal totals are refused; a model
+precision certificate and the cash rounding line cannot absorb an energy
+difference. Battery rounding remains subject to
 the existing exact reconciliation gate. Legacy JSON evidence and drafts keep
 their existing approval rules.
 
@@ -492,7 +456,6 @@ contents. Discovery and draft-persistence storage failures also use safe message
 | `vnb_evidence_missing` | Import and validate the VNB calculated-values delivery for that window. |
 | `metering_readings_invalid` | Check meter ownership, expected channels, interval coverage and reading quality. |
 | `vnb_allocation_mismatch` | Compare the VNB allocation with the independent calculation before retrying. |
-| `vnb_imbalance_exceeds_tolerance` | Review the blocked period in the billing workspace; ask the VNB for a corrected delivery or release a higher tolerance for that period. |
 | `billing_provenance_missing` | Restore the source-document evidence for the readings. |
 | `battery_configuration_invalid` | Check the battery participant, capacity and participant cost shares. |
 | `billing_inputs_changed` | Review changed inputs against the existing immutable draft. |
@@ -501,10 +464,9 @@ contents. Discovery and draft-persistence storage failures also use safe message
 
 A failure may carry an optional `reason` beside the unchanged `error` code; the
 only reason is `vnb_balancing_policy_required`, marking a `vnb_allocation_mismatch`
-whose accepted rounded E66 source totals do not balance within the period's
-tolerance. The imbalance gate normally reports such a period first as
-`vnb_imbalance_exceeds_tolerance`; the reason remains as a second line of
-defence. Either way, the operator never adjusts the physical readings.
+whose accepted source totals do not balance exactly. Obtain a corrected,
+balanced VNB delivery before billing. Never adjust physical readings or absorb
+the energy difference in a money adjustment.
 
 Unknown error codes use `billing_run_failed`. The existing direct Python runner
 retains its detailed exception for local diagnosis; do not publish that exception

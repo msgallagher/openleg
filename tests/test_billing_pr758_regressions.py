@@ -42,7 +42,6 @@ def install_source_runner(monkeypatch, source, *, model="proportional", battery=
     monkeypatch.setattr(database, "is_db_available", lambda: True)
     monkeypatch.setattr(database, "get_billing_policy", lambda *_: policy)
     monkeypatch.setattr(database, "get_battery", lambda *_: battery)
-    monkeypatch.setattr(database, "get_billing_imbalance_release", lambda *_: None)
     monkeypatch.setattr(
         database,
         "get_billable_period_snapshot",
@@ -304,7 +303,6 @@ def test_only_json_quantities_can_fall_back_to_allocated_kwh(format_version, acc
         "vnb_delivered_production_kwh",
         "vnb_imbalance_kwh",
         "vnb_imbalance_ratio",
-        "vnb_imbalance_tolerance_ratio",
     ],
 )
 def test_main_precision_draft_approval_validates_legacy_evidence(
@@ -342,7 +340,6 @@ def test_main_precision_draft_approval_validates_legacy_evidence(
         "vnb_delivered_production_kwh",
         "vnb_imbalance_kwh",
         "vnb_imbalance_ratio",
-        "vnb_imbalance_tolerance_ratio",
     ):
         reconciliation.pop(key)
     if tamper == "source_identity":
@@ -367,7 +364,7 @@ def test_main_precision_draft_approval_validates_legacy_evidence(
     elif tamper == "missing_old_field":
         reconciliation.pop("difference_pct")
     elif tamper is not None:
-        # A present new field is evidence, including an explicit null tolerance.
+        # A present new audit field is evidence, including an explicit null value.
         reconciliation[tamper] = {} if tamper == "engine_audit" else None
 
     if tamper is None:
@@ -410,7 +407,6 @@ def test_legacy_source_validation_still_requires_exact_energy_balance(
         "vnb_delivered_production_kwh",
         "vnb_imbalance_kwh",
         "vnb_imbalance_ratio",
-        "vnb_imbalance_tolerance_ratio",
     ):
         draft["reconciliation"].pop(key)
     producer = next(
@@ -419,7 +415,7 @@ def test_legacy_source_validation_still_requires_exact_energy_balance(
     producer["allocated_kwh"] = 0.999
     producer["source_quantities"].update(community_kwh="0.999", grid_kwh="0.001")
     # Even without a precision certificate, matching each source quantity
-    # cannot authorize unequal totals on a draft without a frozen tolerance.
+    # cannot authorize unequal totals on a legacy draft.
     with pytest.raises(
         billing_reconciliation.ReconciliationError, match="source_quantity_mismatch"
     ):

@@ -23,12 +23,11 @@ Two deliberate choices:
 import logging
 from dataclasses import dataclass, replace
 from datetime import timedelta
-from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-import billing_engine
 import database as db
 
 logger = logging.getLogger(__name__)
@@ -39,16 +38,6 @@ CONFIRMED_STATUS = "confirmed"
 
 _MAX_REPORTED = 5
 _KWH_QUANTUM = Decimal("0.000001")
-
-# Die beiden VNB-Seiten des LEG-Kanals gehen nicht exakt auf. Jede Seite wird je
-# Intervall auf drei Stellen gerundet, und der Rest summiert sich über einen
-# Monat auf einige Hundertstel Prozent. Bis zu dieser Grenze tragen ihn die
-# Gutschriften; darüber ist es kein Rundungsrest mehr, sondern ein Defekt in der
-# Lieferung, und die Periode fällt zu.
-DEFAULT_VNB_IMBALANCE_RATIO = Decimal("0.001")
-# Für eine einzelne Periode darf die LEG die Grenze mit Begründung anheben, aber
-# nie über diesen Wert: was darüber liegt, muss der VNB korrigiert liefern.
-MAX_RELEASED_VNB_IMBALANCE_RATIO = Decimal("0.02")
 
 
 class PeriodDataError(ValueError):
@@ -316,35 +305,8 @@ def _quantised(value):
     return value.quantize(_KWH_QUANTUM, rounding=ROUND_HALF_UP)
 
 
-def imbalance_tolerance(max_imbalance_ratio):
-    """The period's imbalance tolerance: the default, or a released ratio."""
-    if max_imbalance_ratio is None:
-        return DEFAULT_VNB_IMBALANCE_RATIO
-    try:
-        ratio = Decimal(str(max_imbalance_ratio))
-    except ArithmeticError:
-        ratio = None
-    if (
-        ratio is None
-        or not ratio.is_finite()
-        or not Decimal(0) < ratio <= MAX_RELEASED_VNB_IMBALANCE_RATIO
-    ):
-        raise ValueError(
-            "VNB imbalance tolerance must be above 0 and at most "
-            f"{MAX_RELEASED_VNB_IMBALANCE_RATIO}"
-        )
-    return ratio
-
-
-def _vnb_reference(vnb_totals, participants, problems, tolerance):
-    """The VNB's own split, as billed and as delivered.
-
-    ``billed`` is what the line items carry: the consumption side unchanged and
-    the production side distributed over exactly that same energy. ``imbalance``
-    keeps the delivered difference visible instead of letting the distribution
-    absorb it silently. ``tolerance`` is the ratio up to which the difference
-    counts as a rounding residue.
-    """
+def _vnb_reference(vnb_totals, participants, problems):
+    """Bill each side verbatim only when the delivered Decimal totals agree."""
     consumption = vnb_totals["consumption"]
     production = vnb_totals["production"]
     consumption_total = sum(consumption.values(), Decimal(0))
@@ -352,55 +314,25 @@ def _vnb_reference(vnb_totals, participants, problems, tolerance):
     imbalance = production_total - consumption_total
     ratio = abs(imbalance) / consumption_total if consumption_total > 0 else Decimal(0)
 
-    if consumption_total > 0 and production_total <= 0:
+    if consumption_total != production_total:
         problems.append(
             _problem(
-                "vnb_imbalance",
-                f"the VNB allocated {_quantised(consumption_total)} kWh to "
-                "consumers and nothing to producers, so the credits cannot be "
-                "distributed",
+                "vnb_imbalance", "the two VNB community totals must balance exactly"
             )
         )
-    elif production_total > 0 and consumption_total <= 0:
-        problems.append(
-            _problem(
-                "vnb_imbalance",
-                f"the VNB allocated {_quantised(production_total)} kWh to "
-                "producers and nothing to consumers, so nothing can be charged",
-            )
-        )
-    elif ratio > tolerance:
-        problem = _problem(
-            "vnb_imbalance",
-            f"the two VNB sides differ by {_quantised(imbalance)} kWh "
-            f"({_quantised(ratio * 100)}%), above the "
-            f"{tolerance * 100}% tolerance for a rounding residue",
-        )
-        # Die Zahlen, mit denen die LEG die Lieferung beim VNB beanstandet oder
-        # für diese Periode eine höhere Toleranz begründet.
-        problem["figures"] = {
-            "community_consumption_kwh": _quantised(consumption_total),
-            "community_production_kwh": _quantised(production_total),
-            "imbalance_kwh": _quantised(imbalance),
-            # Rounded up: a release of at least this ratio must clear the gate.
-            "imbalance_ratio": ratio.quantize(_KWH_QUANTUM, rounding=ROUND_CEILING),
-            "tolerance_ratio": tolerance,
-        }
-        problems.append(problem)
 
     billed_consumption = {
         participant: _quantised(consumption[participant])
         for participant in participants
     }
-    billed_production = billing_engine.conserving_credits(
-        production, sum(billed_consumption.values(), Decimal(0))
-    )
+    billed_production = {
+        participant: _quantised(production[participant]) for participant in participants
+    }
     return {
         "community_consumption_kwh": float(_quantised(consumption_total)),
         "community_production_kwh": float(_quantised(production_total)),
         "imbalance_kwh": float(_quantised(imbalance)),
         "imbalance_ratio": float(_quantised(ratio)),
-        "imbalance_tolerance_ratio": float(tolerance),
         "per_participant": {
             participant: {
                 "consumption_kwh": float(_quantised(consumption[participant])),
@@ -427,7 +359,6 @@ def load_period_frames(
     period_end,
     *,
     timezone=DEFAULT_TIMEZONE,
-    max_imbalance_ratio=None,
     calculated_delivery=None,
 ):
     """Load one billable period as engine-ready frames.
@@ -438,7 +369,6 @@ def load_period_frames(
     one pass. An accepted calculated delivery supplies the allocation reference;
     physical readings and completeness still come from the period snapshot.
     """
-    tolerance = imbalance_tolerance(max_imbalance_ratio)
     tzinfo = ZoneInfo(timezone)
     period_start = _localise(period_start, tzinfo)
     period_end = _localise(period_end, tzinfo)
@@ -521,7 +451,7 @@ def load_period_frames(
         raise PeriodDataError(problems)
 
     vnb_reference = (
-        _vnb_reference(vnb_totals, participants, problems, tolerance)
+        _vnb_reference(vnb_totals, participants, problems)
         if calculated_delivery is None
         else {}
     )
@@ -544,9 +474,7 @@ def load_period_frames(
         provenance=provenance,
     )
     if calculated_delivery is not None:
-        return with_calculated_vnb_evidence(
-            result, calculated_delivery, max_imbalance_ratio=tolerance
-        )
+        return with_calculated_vnb_evidence(result, calculated_delivery)
     return result
 
 
@@ -558,8 +486,8 @@ def reconcile_with_vnb(frames, summary):
     a true zero and stays a gate: a non-zero difference means billing departed
     from the VNB reference, which is a defect, not a judgement call. What the
     engine's own proportional reallocation would have produced is reported
-    beside it as an audit figure, and so is the delivered imbalance the credits
-    absorb.
+    beside it as an audit figure. The delivered source totals must balance
+    before this reconciliation runs.
     """
     billed_reference = frames.vnb_reference["billed"]
     vnb_allocated = sum(billed_reference["consumption_kwh"].values())
@@ -620,15 +548,12 @@ def reconcile_with_vnb(frames, summary):
         "engine_production_kwh": round(engine_production, 6),
         "production_difference_kwh": round(engine_production - vnb_production, 6),
         "production_per_participant": production_per_participant,
-        # Was der VNB geliefert hat, bevor die Gutschriften den Rest tragen.
+        # Unabhängige Liefer- und Modellwerte für den Audit.
         "vnb_delivered_production_kwh": frames.vnb_reference[
             "community_production_kwh"
         ],
         "vnb_imbalance_kwh": frames.vnb_reference["imbalance_kwh"],
         "vnb_imbalance_ratio": frames.vnb_reference["imbalance_ratio"],
-        "vnb_imbalance_tolerance_ratio": frames.vnb_reference[
-            "imbalance_tolerance_ratio"
-        ],
         "engine_audit": summary.get("engine_audit"),
     }
     if getattr(frames, "provenance", {}).get("vnb_evidence"):
@@ -636,9 +561,8 @@ def reconcile_with_vnb(frames, summary):
     return result
 
 
-def with_calculated_vnb_evidence(frames, delivery, *, max_imbalance_ratio=None):
+def with_calculated_vnb_evidence(frames, delivery):
     """Replace the E66 allocation claim with one accepted calculated delivery."""
-    tolerance = imbalance_tolerance(max_imbalance_ratio)
     if not delivery or delivery.get("status") != "accepted":
         raise PeriodDataError(
             [_problem("invalid_vnb_evidence", "delivery is not accepted")]
@@ -673,7 +597,7 @@ def with_calculated_vnb_evidence(frames, delivery, *, max_imbalance_ratio=None):
         for direction in ("consumption", "production")
     }
     problems = []
-    reference = _vnb_reference(totals, frames.participants, problems, tolerance)
+    reference = _vnb_reference(totals, frames.participants, problems)
     if problems:
         raise PeriodDataError(problems)
     provenance = dict(frames.provenance)
@@ -723,7 +647,7 @@ def calculated_quantity_frames(frames, delivery):
     return quantities["consumption"], quantities["production"]
 
 
-def frames_from_calculated_source(delivery, *, max_imbalance_ratio=None):
+def frames_from_calculated_source(delivery):
     """Rebuild independent audit inputs from an already audited E66 source."""
     rows = delivery["normalized_records"]
     index = pd.DatetimeIndex(sorted({pd.Timestamp(row["measured_at"]) for row in rows}))
@@ -743,6 +667,4 @@ def frames_from_calculated_source(delivery, *, max_imbalance_ratio=None):
         vnb_reference={},
         provenance={},
     )
-    return with_calculated_vnb_evidence(
-        frames, delivery, max_imbalance_ratio=max_imbalance_ratio
-    )
+    return with_calculated_vnb_evidence(frames, delivery)

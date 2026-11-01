@@ -187,11 +187,10 @@ it.
 
 - **Interface:** confirmed LEG administrators use the private
   `/leg/community/<community_id>/archive` controls to export, validate, and
-  restore `openleg-community-archive/3` JSON (version 1 and 2 imports remain supported).
+  restore `openleg-community-archive/2` JSON (legacy version 1 imports remain supported).
 - **Contents:** the selected community, its member profiles and consent
   metadata, formation and signed documents, correspondence and attachments,
-  metering mappings and readings, billing policies and periods, imbalance
-  releases and blocks, line items,
+  metering mappings and readings, billing policies and periods, line items,
   immutable invoices, delivery/correction records and lifecycle events,
   accepted VNB sources and withdrawals, VNB handover/mutation evidence, payment
   reconciliation, invoice questions and attachments, role audit, batteries,
@@ -279,12 +278,10 @@ it.
 
 - **Tables:** `billing_periods`, `billing_tariffs`, `invoices`,
   `billing_line_items`, `invoice_corrections`, `invoice_lifecycle_events`,
-  `invoice_delivery_jobs`, `billing_imbalance_releases`,
-  `billing_imbalance_blocks`
+  `invoice_delivery_jobs`
 - **Holds:** tariffs (`internal_price_chf_per_kwh`, `grid_fee_chf_per_kwh`,
   frozen `policy_snapshot`), per-member invoice lines, lifecycle and delivery
-  state. Community-level VNB totals of periods blocked by an imbalance, and the
-  per-period tolerance releases with reason and author.
+  state.
 - **Purpose:** the LEG's financial accounting and member invoices.
 - **Owner:** the LEG (operator approves); members see their own invoices.
 - **Sensitivity:** financial personal data.

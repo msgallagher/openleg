@@ -3,7 +3,6 @@
 
 import hashlib
 import json
-import logging
 from dataclasses import replace
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -17,8 +16,6 @@ import billing_reconciliation
 import database as db
 import quartierakku
 
-logger = logging.getLogger(__name__)
-
 
 class BillingRunError(ValueError):
     """A billing run cannot safely persist a draft."""
@@ -30,7 +27,6 @@ class BillingRunError(ValueError):
             "vnb_evidence_missing",
             "metering_readings_invalid",
             "vnb_allocation_mismatch",
-            "vnb_imbalance_exceeds_tolerance",
             "billing_inputs_changed",
             "battery_configuration_invalid",
             "billing_store_unavailable",
@@ -48,40 +44,6 @@ class BillingRunError(ValueError):
             if reason in self._REASONS and self.code == "vnb_allocation_mismatch"
             else None
         )
-
-
-def _imbalance_release(community_id, period_start, period_end):
-    """The newest tolerance release of the window; none without a database."""
-    if not db.is_db_available():
-        return None
-    return db.get_billing_imbalance_release(community_id, period_start, period_end)
-
-
-def _record_imbalance_block(community_id, period_start, period_end, figures):
-    """Keep the figures that stopped the run for the workspace."""
-    if db.is_db_available():
-        db.record_billing_imbalance_block(
-            community_id, period_start, period_end, figures
-        )
-
-
-def _release_snapshot(release):
-    """Freeze who raised the tolerance, to what and why, onto the draft."""
-    return {
-        "id": release["id"],
-        "max_imbalance_ratio": str(release["max_imbalance_ratio"]),
-        "reason": release["reason"],
-        "released_by": release["released_by"],
-        "released_at": release["released_at"].isoformat(),
-    }
-
-
-def _imbalance_figures(error):
-    """The figures of a tolerance breach, or None for any other defect."""
-    for problem in error.problems:
-        if problem["kind"] == "vnb_imbalance" and problem.get("figures"):
-            return problem["figures"]
-    return None
 
 
 def _battery_lines(community_id, participants, period_start, period_end):
@@ -236,7 +198,6 @@ def _main_draft_fingerprint(
         "vnb_delivered_production_kwh",
         "vnb_imbalance_kwh",
         "vnb_imbalance_ratio",
-        "vnb_imbalance_tolerance_ratio",
     ):
         audit.pop(key, None)
     if precision_basis:
@@ -293,10 +254,6 @@ def run_billing_period(
             )
         policy = {**policy, "community_id": community_id}
 
-        release = _imbalance_release(community_id, period_start, period_end)
-        tolerance = billing_readings.imbalance_tolerance(
-            release["max_imbalance_ratio"] if release else None
-        )
         calculated = None
         if db.is_db_available():
             calculated = db.get_validated_calculated_values(
@@ -313,7 +270,6 @@ def run_billing_period(
             community_id,
             period_start,
             period_end,
-            max_imbalance_ratio=tolerance,
             calculated_delivery=calculated,
         )
         if not frames.provenance["source_document_ids"]:
@@ -398,7 +354,7 @@ def run_billing_period(
                     calculated, model=policy["distribution_model"]
                 )
                 source_frames = billing_readings.frames_from_calculated_source(
-                    calculated, max_imbalance_ratio=tolerance
+                    calculated
                 )
                 if any(
                     not actual.tz_convert("UTC").round(6).equals(source.round(6))
@@ -421,7 +377,6 @@ def run_billing_period(
                     network_level=policy["network_level"],
                     distribution_model=policy["distribution_model"],
                     settlement_fee_per_kwh=policy["settlement_fee_chf_per_kwh"],
-                    max_imbalance_ratio=tolerance,
                 )
                 # Here the source quantities are what gets billed, so the
                 # reconciliation keeps the engine's own allocation beside them:
@@ -445,8 +400,6 @@ def run_billing_period(
             except ValueError as exc:
                 raise BillingRunError(str(exc), code="vnb_allocation_mismatch") from exc
             reconciliation["precision_policy"] = certificate
-        if release:
-            reconciliation["vnb_imbalance_release"] = _release_snapshot(release)
         if battery_lines:
             summary["line_items"].extend(battery_lines)
         if battery_snapshot:
@@ -479,7 +432,6 @@ def run_billing_period(
             matches_main = (
                 existing["input_fingerprint"] != fingerprint
                 and existing.get("status") == "draft"
-                and not release
                 and existing["input_fingerprint"]
                 == _main_draft_fingerprint(
                     frames,
@@ -510,8 +462,7 @@ def run_billing_period(
             billing_policy_snapshot=dict(policy),
             prepared_by=prepared_by or "system",
         )
-        # A named preparer, such as the person who raised the tolerance, is
-        # stored; automated runs leave it unset until a human submits the draft.
+        # Persist a named preparer; automated runs wait for a human to submit.
         period_id = db.save_billing_period(
             community_id,
             period_start,
@@ -525,21 +476,15 @@ def run_billing_period(
     except billing_engine.BatteryBilledSplitMismatch as exc:
         raise BillingRunError(str(exc), code="vnb_allocation_mismatch") from exc
     except billing_readings.PeriodDataError as exc:
-        figures = _imbalance_figures(exc)
-        if figures is None:
-            raise BillingRunError(str(exc), code="metering_readings_invalid") from exc
-        try:
-            # A window that already has a live draft, billed under an earlier
-            # rule, is not blocked; listing it would offer a second draft.
-            if (
-                db.get_billing_period_for_window(community_id, period_start, period_end)
-                is None
-            ):
-                _record_imbalance_block(community_id, period_start, period_end, figures)
-        except (db.BillingStoreError, DatabaseError):
-            # The imbalance stopped the run; a lost block only hides the figures.
-            logger.error("Could not record the imbalance block of %s", community_id)
-        raise BillingRunError(str(exc), code="vnb_imbalance_exceeds_tolerance") from exc
+        if calculated is not None and any(
+            problem["kind"] == "vnb_imbalance" for problem in exc.problems
+        ):
+            raise BillingRunError(
+                str(exc),
+                code="vnb_allocation_mismatch",
+                reason="vnb_balancing_policy_required",
+            ) from exc
+        raise BillingRunError(str(exc), code="metering_readings_invalid") from exc
     except (db.BillingStoreError, DatabaseError) as exc:
         raise BillingRunError(str(exc), code="billing_store_unavailable") from exc
     except (KeyError, ValueError) as exc:
