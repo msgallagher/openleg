@@ -102,6 +102,21 @@ def _safe_result(saved):
     return {key: value for key, value in saved.items() if key != "evidence_bytes"}
 
 
+def _refused_fingerprint(fingerprint, payload, transport, diagnostics):
+    """Include discarded input without changing accepted delivery identities."""
+    identity = {
+        "normalized_fingerprint": fingerprint,
+        "refused_payload": payload,
+        "diagnostics": diagnostics,
+    }
+    if transport not in TRANSPORTS:
+        identity["unsupported_transport"] = transport
+    encoded = json.dumps(
+        identity, sort_keys=True, separators=(",", ":"), default=str
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def accept_delivery(
     payload, *, transport, evidence, repository=None, source_metadata=None
 ):
@@ -271,6 +286,8 @@ def accept_delivery(
         )
     ):
         diagnostics.append({"code": "overlapping_period"})
+    if diagnostics:
+        fingerprint = _refused_fingerprint(fingerprint, payload, transport, diagnostics)
     metadata_invalid = bool(diagnostics) and not record_problem
     status = (
         "partially_invalid"

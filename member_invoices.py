@@ -96,13 +96,8 @@ def _require_date_text(value, message: str) -> str:
     raise MemberInvoiceDataError(message)
 
 
-def _require_period_date_text(value, message: str) -> str:
-    """Require a period boundary, read in the timezone the period was billed in.
-
-    Boundaries are frozen as UTC instants, so an August period starts at
-    2026-07-31T22:00:00+00:00. Truncating that string to its first ten
-    characters drops the offset and dates the member's own invoice to July.
-    """
+def _require_period_boundary(value, message: str):
+    """Read a period boundary in the timezone the period was billed in."""
     if isinstance(value, str) and value.strip():
         try:
             value = datetime.fromisoformat(value)
@@ -113,7 +108,14 @@ def _require_period_date_text(value, message: str) -> str:
             value = value.astimezone(ZoneInfo(billing_workspace.PERIOD_TIMEZONE))
         except (OverflowError, ValueError):
             raise MemberInvoiceDataError(message) from None
-    return _require_date_text(value, message)
+    if not isinstance(value, (datetime, date)):
+        raise MemberInvoiceDataError(message)
+    return value
+
+
+def _require_period_date_text(value, message: str) -> str:
+    """Display Swiss dates even when boundaries are frozen as UTC instants."""
+    return _require_date_text(_require_period_boundary(value, message), message)
 
 
 def _require_text(value, message: str) -> str:
@@ -561,8 +563,11 @@ def _detail_from_invoice(invoice: dict, building_id: str) -> dict:
         provenance.get("period_start"),
         "Die Rechnung hat keine gültige Periodenangabe.",
     )
-    period_end = _require_period_date_text(
+    period_end_boundary = _require_period_boundary(
         provenance.get("period_end"), "Die Rechnung hat keine gültige Periodenangabe."
+    )
+    period_end = _require_date_text(
+        period_end_boundary, "Die Rechnung hat keine gültige Periodenangabe."
     )
 
     line_items_raw = _require_json_list(
@@ -590,10 +595,20 @@ def _detail_from_invoice(invoice: dict, building_id: str) -> dict:
     period_end_date = date.fromisoformat(period_end)
     issue_date = date.fromisoformat(summary["issue_date"])
     due_date = date.fromisoformat(summary["due_date"])
-    if not (
-        period_start_date < period_end_date <= issue_date
-        and due_date == issue_date + timedelta(days=payment_days)
-    ):
+    try:
+        last_covered_day = (
+            (period_end_boundary - timedelta(microseconds=1)).date()
+            if isinstance(period_end_boundary, datetime)
+            else period_end_boundary - timedelta(days=1)
+        )
+        dates_consistent = (
+            period_start_date < period_end_date
+            and last_covered_day <= issue_date
+            and due_date == issue_date + timedelta(days=payment_days)
+        )
+    except (OverflowError, ValueError):
+        dates_consistent = False
+    if not dates_consistent:
         raise MemberInvoiceDataError(
             "Die Datumsangaben der Rechnung sind inkonsistent."
         )
